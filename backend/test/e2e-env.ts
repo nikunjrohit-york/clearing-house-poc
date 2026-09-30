@@ -1,0 +1,15 @@
+process.env.AVAILITY_CLIENT_ID = 'poc-e2e-client';
+process.env.AVAILITY_CLIENT_SECRET = 'poc-e2e-secret';
+process.env.AVAILITY_SCOPE = 'hipaa';
+process.env.AVAILITY_TOKEN_URL = 'https://api.availity.com/availity/v1/token';
+process.env.AVAILITY_BASE_URL = 'https://api.availity.com';
+process.env.AVAILITY_SUBMITTER_ID = 'AV09311993';
+process.env.AVAILITY_RECEIVER_ID = '030240928';
+process.env.AVAILITY_USAGE_INDICATOR = 'T';
+process.env.AVAILITY_SFTP_HOST = 'qa-files.availity.com';
+process.env.AVAILITY_SFTP_PORT = '22';
+process.env.AVAILITY_SFTP_USERNAME = 'qa-user';
+process.env.AVAILITY_SFTP_PASSWORD = 'qa-pass';
+process.env.AVAILITY_SFTP_SEND_PATH = '/SendFiles';
+process.env.AVAILITY_SFTP_RECEIVE_PATH = '/ReceiveFiles';
+process.env.NODE_ENV = 'test';

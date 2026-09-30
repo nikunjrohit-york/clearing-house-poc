@@ -120,6 +120,14 @@ export class SftpService {
       throw new BadRequestException('AVAILITY_SFTP_USERNAME is required');
     }
 
+    if (privateKeyPath && password) {
+      throw new BadRequestException('Use either AVAILITY_SFTP_PASSWORD or AVAILITY_SFTP_PRIVATE_KEY_PATH, not both');
+    }
+
+    if (password) {
+      this.assertPasswordPolicy(username, password);
+    }
+
     const options: SftpClient.ConnectOptions = {
       host,
       port,
@@ -208,6 +216,27 @@ export class SftpService {
     return normalized || fallback;
   }
 
+  // Companion Guide §3.1. History, expiry, and lockout are account rules Availity enforces; this checks only the composition we can see.
+  private assertPasswordPolicy(username: string, password: string): void {
+    const problems: string[] = [];
+    if (password.length < 14) {
+      problems.push('at least 14 characters');
+    }
+    if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
+      problems.push('one lowercase, one uppercase, one number, and one special character');
+    }
+    if (username && password.toLowerCase().includes(username.toLowerCase())) {
+      problems.push('must not contain the SFTP username');
+    }
+    if (problems.length > 0) {
+      throw new BadRequestException(`SFTP password does not meet Availity policy: ${problems.join('; ')}`);
+    }
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
   private safeFileName(fileName: string): string {
     const trimmed = fileName?.trim() ?? '';
     const base = path.basename(trimmed);
@@ -224,7 +253,18 @@ export class SftpService {
       .map((name) => name.toLowerCase())
       .filter((name, index, all) => name.length > 0 && all.indexOf(name) === index);
 
-    return bases.some((base) => suffixes.some((suffix) => remote === `${base}${suffix}`));
+    return bases.some((base) =>
+      suffixes.some((suffix) => {
+        if (remote === `${base}${suffix}`) {
+          return true;
+        }
+        // Companion Guide §3.4: <original>-<AvailityBatchID>-success or -FAILED. Batch ID shape is UNCONFIRMED beyond digits.
+        if (suffix === '-success' || suffix === '-failed') {
+          return new RegExp(`^${this.escapeRegex(base)}-\\d{8,}${suffix}$`, 'i').test(remote);
+        }
+        return false;
+      }),
+    );
   }
 
   private readDownloaded(payload: string | Buffer | NodeJS.WritableStream): string {

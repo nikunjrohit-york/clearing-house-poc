@@ -21,7 +21,7 @@ function service(): SftpService {
     AVAILITY_SFTP_HOST: 'qa-files.availity.com',
     AVAILITY_SFTP_PORT: '22',
     AVAILITY_SFTP_USERNAME: 'qa-user',
-    AVAILITY_SFTP_PASSWORD: 'qa-pass',
+    AVAILITY_SFTP_PASSWORD: 'Qa-Test-123456',
     AVAILITY_SFTP_SEND_PATH: '/SendFiles',
   };
   return new SftpService({
@@ -49,7 +49,7 @@ describe('SftpService', () => {
         host: 'qa-files.availity.com',
         port: 22,
         username: 'qa-user',
-        password: 'qa-pass',
+        password: 'Qa-Test-123456',
       }),
     );
     expect(mockSftp.put).toHaveBeenCalledWith(expect.any(Buffer), '/SendFiles/BATCH_000000001.txt');
@@ -118,6 +118,15 @@ describe('SftpService', () => {
     await expect(service().checkUploadNotification('BATCH_000000001.txt')).resolves.toMatchObject({
       status: 'FAILED',
       errorDetails: 'Empty file',
+    });
+  });
+
+  it('returns SUCCESS when the notification includes an Availity batch id', async () => {
+    mockSftp.list.mockResolvedValue([{ name: 'BATCH_000000001.txt-2026092814300001-success', type: '-' }]);
+
+    await expect(service().checkUploadNotification('BATCH_000000001.txt')).resolves.toMatchObject({
+      status: 'SUCCESS',
+      notificationFile: 'BATCH_000000001.txt-2026092814300001-success',
     });
   });
 

@@ -173,7 +173,9 @@ export default function BatchClaimTab() {
       <form onSubmit={onSubmit} className="space-y-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Batch 837P claim</h2>
-          <p className="mt-1 text-sm text-slate-500">Builds a professional claim and uploads it to Availity /SendFiles/.</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Builds a professional claim and uploads BATCH_&lt;ICN&gt;.txt to /SendFiles/. Availity posts a -success or -FAILED file in that same folder. There is no webhook.
+          </p>
         </div>
 
         <div className="grid gap-4 md:grid-cols-3">

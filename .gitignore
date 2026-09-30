@@ -38,6 +38,7 @@ coverage/
 tmp/
 temp/
 *.tmp
+.availity-control-numbers.json
 
 # Cache
 .cache/

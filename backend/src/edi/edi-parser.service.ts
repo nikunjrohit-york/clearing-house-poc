@@ -22,6 +22,8 @@ export interface PipeClaim {
   statusDescription: string;
   errors: ClaimNote[];
   warnings: ClaimNote[];
+  adjudications: ClaimNote[];
+  cleanNotes: ClaimNote[];
 }
 
 export interface PipeDelimitedReport {
@@ -93,8 +95,9 @@ export interface Acknowledgment999 {
     includedSets: number;
     receivedSets: number;
     acceptedSets: number;
-    errorCodes: string[];
-  };
+  errorCodes: string[];
+  originalInterchangeControlNumber?: string;
+};
   rowErrors: string[];
 }
 
@@ -104,7 +107,16 @@ export interface UnknownReport {
   rowErrors: string[];
 }
 
-export type ParsedEdiReport = PipeDelimitedReport | Acknowledgment999 | UnknownReport;
+export interface Ta1Report {
+  reportType: 'TA1';
+  fileName?: string;
+  interchangeControlNumber: string;
+  acknowledgmentCode: string;
+  noteCode: string;
+  rowErrors: string[];
+}
+
+export type ParsedEdiReport = PipeDelimitedReport | Acknowledgment999 | Ta1Report | UnknownReport;
 
 export interface ReportSummary {
   reportType: string;
@@ -176,6 +188,9 @@ export class EdiParserService {
       if (extension === '999' || this.looksLike999(text)) {
         return this.parse999(text, fileName);
       }
+      if (extension === 'ta1' || extension === 'tat' || this.looksLikeTa1(text)) {
+        return this.parseTa1(text, fileName);
+      }
       if (this.isPipeExtension(extension) || this.looksLikePipeReport(text)) {
         return this.parsePipeReport(text, fileName, extension);
       }
@@ -211,6 +226,16 @@ export class EdiParserService {
         acceptedSets: report.groupAcknowledgment.acceptedSets,
         segmentErrors,
         elementErrors,
+        rowErrors: report.rowErrors,
+      };
+    }
+
+    if (report.reportType === 'TA1') {
+      return {
+        reportType: 'TA1',
+        fileControlNumber: report.interchangeControlNumber,
+        status: report.acknowledgmentCode,
+        statusDescription: report.noteCode,
         rowErrors: report.rowErrors,
       };
     }
@@ -299,6 +324,21 @@ export class EdiParserService {
               unassignedWarnings += 1;
               unassignedNotes.push(note);
               rowErrors.push(`Line ${lineNumber}: warning note appeared before a claim row`);
+            }
+            break;
+          }
+          case '3a':
+          case '3c': {
+            const note = this.parseNote(parts, lineNumber, rowErrors);
+            if (!currentClaim) {
+              unassignedNotes.push(note);
+              rowErrors.push(`Line ${lineNumber}: ${recordType} note appeared before a claim row`);
+              break;
+            }
+            if (recordType === '3a') {
+              currentClaim.adjudications.push(note);
+            } else {
+              currentClaim.cleanNotes.push(note);
             }
             break;
           }
@@ -411,6 +451,8 @@ export class EdiParserService {
       statusDescription: status === 'A' ? 'Accepted' : status === 'R' ? 'Rejected' : 'Unknown',
       errors: [],
       warnings: [],
+      adjudications: [],
+      cleanNotes: [],
     };
   }
 
@@ -463,6 +505,7 @@ export class EdiParserService {
       errorCodes: [],
     };
     let sawAk9 = false;
+    let originalInterchangeControlNumber = '';
 
     segments.forEach((segment, index) => {
       const segmentNumber = index + 1;
@@ -529,6 +572,9 @@ export class EdiParserService {
               rowErrors.push(`Segment ${segmentNumber}: IK5 appeared before AK2`);
             }
             break;
+          case 'TA1':
+            originalInterchangeControlNumber = elements[1] || '';
+            break;
           case 'AK9':
             sawAk9 = true;
             groupAcknowledgment = {
@@ -554,6 +600,10 @@ export class EdiParserService {
 
     if (!sawAk9) {
       rowErrors.push('AK9 group acknowledgment is missing');
+    }
+
+    if (originalInterchangeControlNumber) {
+      groupAcknowledgment.originalInterchangeControlNumber = originalInterchangeControlNumber;
     }
 
     return {
@@ -677,8 +727,29 @@ export class EdiParserService {
     return /(?:^|~|\n)\s*(ST\*999\*|AK1\*)/i.test(content);
   }
 
+  private looksLikeTa1(content: string): boolean {
+    return /(?:^|~|\n)\s*TA1\*/i.test(content) && !this.looksLike999(content);
+  }
+
+  private parseTa1(content: string, fileName?: string): Ta1Report {
+    const segment = this.x12Segments(content).find((entry) => entry.toUpperCase().startsWith('TA1*'));
+    const elements = segment?.split('*') ?? [];
+    const rowErrors: string[] = [];
+    if (!elements[1]) {
+      rowErrors.push('TA101 interchange control number is missing');
+    }
+    return {
+      reportType: 'TA1',
+      fileName,
+      interchangeControlNumber: elements[1] || '',
+      acknowledgmentCode: elements[4] || '',
+      noteCode: elements[5] || '',
+      rowErrors,
+    };
+  }
+
   private looksLikePipeReport(content: string): boolean {
-    return /^\s*[123]\|/m.test(content) || /^\s*3[ew]\|/im.test(content);
+    return /^\s*[123]\|/m.test(content) || /^\s*3[ewac]\|/im.test(content);
   }
 
   private looksLikeSegment(value: string): boolean {

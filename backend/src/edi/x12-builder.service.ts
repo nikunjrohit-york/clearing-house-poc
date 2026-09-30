@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'fs';
+import * as path from 'path';
 import { plainToInstance } from 'class-transformer';
 import { validateSync, ValidationError } from 'class-validator';
 import {
@@ -16,6 +18,7 @@ import {
   ClaimDependent,
   ClaimServiceLine,
   ClaimType,
+  ClaimFrequencyCode,
   PlaceOfService,
 } from './dto/claim-input.dto';
 
@@ -30,16 +33,64 @@ export class X12BuilderService {
   private groupControlNumber = 0;
   private transactionControlNumber = 0;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService) {
+    // Companion Guide §3.4: a reused ISA13 is rejected as a duplicate file. Tests keep a deterministic counter.
+    if (process.env.NODE_ENV === 'test') {
+      return;
+    }
+    this.restoreControlNumbers();
+  }
+
+  private controlNumberStore(): string {
+    return (
+      this.configService.get<string>('AVAILITY_CONTROL_NUMBER_STORE') ||
+      path.join(process.cwd(), '.availity-control-numbers.json')
+    );
+  }
+
+  private restoreControlNumbers(): void {
+    const store = this.controlNumberStore();
+    try {
+      const saved = JSON.parse(fs.readFileSync(store, 'utf8')) as {
+        interchange?: number;
+        group?: number;
+        transaction?: number;
+      };
+      this.interchangeControlNumber = Number(saved.interchange) || 0;
+      this.groupControlNumber = Number(saved.group) || 0;
+      this.transactionControlNumber = Number(saved.transaction) || 0;
+    } catch {
+      const seed = Number(String(Date.now()).slice(-9)) || 1;
+      this.interchangeControlNumber = seed;
+      this.groupControlNumber = seed;
+      this.transactionControlNumber = seed;
+    }
+  }
+
+  private persistControlNumbers(): void {
+    if (process.env.NODE_ENV === 'test') {
+      return;
+    }
+    const store = this.controlNumberStore();
+    fs.writeFileSync(
+      store,
+      JSON.stringify({
+        interchange: this.interchangeControlNumber,
+        group: this.groupControlNumber,
+        transaction: this.transactionControlNumber,
+      }),
+    );
+  }
 
   private getNextInterchangeControlNumber(): string {
     this.interchangeControlNumber = (this.interchangeControlNumber % 999999999) + 1;
     return this.interchangeControlNumber.toString().padStart(9, '0');
   }
 
+  // Companion Guide §3.6 / prompt GS06: unique, no leading zeroes, and equal to GE02.
   private getNextGroupControlNumber(): string {
     this.groupControlNumber = (this.groupControlNumber % 999999999) + 1;
-    return this.groupControlNumber.toString().padStart(9, '0');
+    return String(this.groupControlNumber);
   }
 
   private getNextTransactionControlNumber(): string {
@@ -95,14 +146,129 @@ export class X12BuilderService {
     return this.formatDate8(value).slice(2);
   }
 
-  private formatTime4(now = new Date()): string {
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
+  // GS05 is HHMM in GMT. ISA09/ISA10 time zone is not stated separately, so both envelope clocks use UTC.
+  private formatUtcDate8(now: Date): string {
+    const year = now.getUTCFullYear();
+    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(now.getUTCDate()).padStart(2, '0');
+    return `${year}${month}${day}`;
+  }
+
+  private formatUtcDate6(now: Date): string {
+    return this.formatUtcDate8(now).slice(2);
+  }
+
+  private formatUtcTime4(now: Date): string {
+    const hours = String(now.getUTCHours()).padStart(2, '0');
+    const minutes = String(now.getUTCMinutes()).padStart(2, '0');
     return `${hours}${minutes}`;
   }
 
+  // Companion Guide §3.7: whole-dollar amounts have no decimal; cents are rounded to 2 places.
+  private formatTime4(now = new Date()): string {
+    return this.formatUtcTime4(now);
+  }
+
+  private assertEnvelopeEnvironment(): void {
+    const host = this.configService.get<string>('AVAILITY_SFTP_HOST') || 'qa-files.availity.com';
+    const usage = this.usageIndicator();
+    if (this.configService.get<string>('AVAILITY_ALLOW_ENV_MISMATCH') === 'true') {
+      return;
+    }
+    // Case 18993019: QA host is qa-files.availity.com and production is files.availity.com. ISA15 must match.
+    if (host === 'qa-files.availity.com' && usage === 'P') {
+      throw new BadRequestException('ISA15=P cannot be sent to qa-files.availity.com without AVAILITY_ALLOW_ENV_MISMATCH=true');
+    }
+    if (host === 'files.availity.com' && usage === 'T') {
+      throw new BadRequestException('ISA15=T cannot be sent to files.availity.com without AVAILITY_ALLOW_ENV_MISMATCH=true');
+    }
+  }
+
+  // Companion Guide §3.7. Field names are included so the API can show which edit failed.
+  private assertAvailityEdits(claim: ClaimInputDto): void {
+    const problems: string[] = [];
+    if (claim.frequencyCode === ClaimFrequencyCode.CORRECTED) {
+      problems.push('frequencyCode: claim frequency code 6 is not accepted');
+    }
+    if (claim.serviceLines.length > 50) {
+      problems.push('serviceLines: a professional claim can contain at most 50 service lines');
+    }
+    if (claim.tradingPartnerId.trim().toUpperCase() === 'XV') {
+      problems.push('tradingPartnerId: National Plan ID qualifier XV is not accepted');
+    }
+    const primary = claim.diagnoses[0]?.code?.replace(/\./g, '') ?? '';
+    if (/^E/i.test(primary)) {
+      problems.push('diagnoses[0].code: an E code cannot be the primary diagnosis');
+    }
+    const today = this.formatUtcDate8(new Date());
+    const dates: Array<[string, string | undefined]> = [
+      ['subscriber.dateOfBirth', claim.subscriber?.dateOfBirth],
+      ['admissionDate', claim.admissionDate],
+      ['dischargeDate', claim.dischargeDate],
+      ...claim.serviceLines.map((line, index) => [`serviceLines[${index}].serviceDate`, line.serviceDate] as [string, string]),
+    ];
+    for (const [field, value] of dates) {
+      if (!value) {
+        continue;
+      }
+      const formatted = this.formatDate8(value);
+      if (formatted >= today) {
+        problems.push(`${field}: date ${formatted} must be before the transaction creation date ${today}`);
+      }
+    }
+    const zipFields: Array<[string, string | undefined]> = [
+      ['billingProvider.zip', claim.billingProvider?.zip],
+      ['subscriber.zip', claim.subscriber?.zip],
+    ];
+    for (const [field, zip] of zipFields) {
+      if (zip?.includes('-')) {
+        problems.push(`${field}: ZIP codes cannot contain a dash`);
+      }
+    }
+    const inpatient = claim.serviceLines.some((line) => line.placeOfService === PlaceOfService.INPATIENT_HOSPITAL);
+    if (inpatient && !claim.admissionDate) {
+      problems.push('admissionDate: an admission date is required on inpatient claims');
+    }
+    const medicare = /medicare/i.test(claim.tradingPartnerId) || claim.tradingPartnerId.trim().toUpperCase() === 'CMS';
+    const memberId = claim.subscriber?.memberId?.replace(/-/g, '') ?? '';
+    if (medicare && /^\d{9}$/.test(memberId)) {
+      // UNCONFIRMED: which payer IDs count as Medicare. Matched only on the trading-partner text above.
+      problems.push('subscriber.memberId: a subscriber SSN is not accepted on Medicare claims');
+    }
+    if (claim.oxygenTherapy) {
+      problems.push('oxygenTherapy: CR5/2400E mapping is UNCONFIRMED, so oxygen claims are rejected instead of emitted incomplete');
+    }
+    if (claim.homeHealth) {
+      problems.push('homeHealth: CR6 mapping is UNCONFIRMED, so home health claims are rejected instead of emitted incomplete');
+    }
+    this.collectDelimiterProblems(claim, 'claim', problems);
+    if (problems.length > 0) {
+      throw new BadRequestException(problems);
+    }
+  }
+
+  private collectDelimiterProblems(value: unknown, field: string, problems: string[]): void {
+    if (typeof value === 'string' && /[~*^:]/.test(value)) {
+      problems.push(`${field}: value contains a delimiter (~ * ^ :) and cannot be sent`);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => this.collectDelimiterProblems(entry, `${field}[${index}]`, problems));
+      return;
+    }
+    if (value && typeof value === 'object') {
+      Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
+        this.collectDelimiterProblems(entry, `${field}.${key}`, problems);
+      });
+    }
+  }
+
   private money(amount: number): string {
-    return (Math.round(amount * 100) / 100).toFixed(2);
+    const rounded = Math.round(amount * 100) / 100;
+    if (Number.isInteger(rounded)) {
+      return String(rounded);
+    }
+    return rounded.toFixed(2);
   }
 
   private seg(id: string, elements: Array<string | number | null | undefined>): string {
@@ -123,8 +289,8 @@ export class X12BuilderService {
       this.pad(this.submitterId(), 15),
       '01',
       this.pad(this.receiverId(), 15),
-      this.formatDate6(now),
-      this.formatTime4(now),
+      this.formatUtcDate6(now),
+      this.formatUtcTime4(now),
       '^',
       '00501',
       icn,
@@ -140,8 +306,8 @@ export class X12BuilderService {
       functionalId,
       this.submitterId(),
       this.receiverId(),
-      this.formatDate8(now),
-      this.formatTime4(now),
+      this.formatUtcDate8(now),
+      this.formatUtcTime4(now),
       groupControlNumber,
       'X',
       version,
@@ -158,6 +324,7 @@ export class X12BuilderService {
       ...body,
     ];
     transaction.push(this.seg('SE', [String(transaction.length + 1), transactionControlNumber]));
+    this.persistControlNumbers();
 
     const segments = [
       this.buildIsa(interchangeControlNumber, now),
@@ -178,6 +345,8 @@ export class X12BuilderService {
     if (claim.claimType !== ClaimType.PROFESSIONAL) {
       throw new BadRequestException('build837Claim emits HIPAA 5010 837P professional claims (005010X222A1)');
     }
+    this.assertEnvelopeEnvironment();
+    this.assertAvailityEdits(claim);
     return claim;
   }
 
@@ -396,7 +565,7 @@ export class X12BuilderService {
     const modifiers = [line.modifier1, line.modifier2, line.modifier3, line.modifier4]
       .map((modifier) => this.text(modifier))
       .filter((modifier) => modifier !== '');
-    const procedure = ['HC', this.text(line.procedureCode), ...modifiers].join(':');
+    const procedure = ['HC', this.text(line.procedureCode).replace(/\./g, ''), ...modifiers].join(':');
     const lineCharge = Math.round(line.quantity * line.unitPrice * 100) / 100;
     const segments = [
       this.seg('LX', [String(line.lineNumber || index + 1)]),

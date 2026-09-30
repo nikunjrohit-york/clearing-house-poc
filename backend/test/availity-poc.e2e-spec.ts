@@ -251,13 +251,13 @@ describe('Availity PoC workflows', () => {
         host: 'qa-files.availity.com',
         port: 22,
         username: 'qa-user',
-        password: 'qa-pass',
+        password: 'Qa-Test-123456',
       }),
     );
     expect(putCall?.[1]).toBe(`/SendFiles/${upload.fileName}`);
     expect(isa.startsWith('ISA*00*')).toBe(true);
     expect(payload).toContain('ST*837*');
-    expect(payload).toContain(`CLM*${SAMPLE_CLAIM_CONTROL_NUMBER}*185.00`);
+    expect(payload).toContain(`CLM*${SAMPLE_CLAIM_CONTROL_NUMBER}*185`);
     expect(payload).toContain('NM1*85*');
     expect(payload).toContain('REF*EI*123456789');
     expect(upload.remotePath).toBe(`/SendFiles/${upload.fileName}`);

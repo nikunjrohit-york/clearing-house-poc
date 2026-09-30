@@ -164,7 +164,9 @@ export default function ReportsTab() {
       <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Reports and remittances</h2>
-          <p className="mt-1 text-sm text-slate-500">Parsed IBR, EBR, DPR, and 999 files from /ReceiveFiles/.</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Parsed files from /ReceiveFiles/. Order is notification, ACK, TA1, 999, IBR, EBR, DPR, then ERA. SendFiles notifications are purged nightly. ReceiveFiles copies are archived after 30 days.
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <FilterButton active={filter === 'all'} onClick={() => setFilter('all')}>

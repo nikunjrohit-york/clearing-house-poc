@@ -158,7 +158,7 @@ export default function EligibilityTab() {
       <form onSubmit={onSubmit} className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Real-time eligibility</h2>
-          <p className="mt-1 text-sm text-slate-500">POST /api/availity/eligibility checks Availity coverages.</p>
+          <p className="mt-1 text-sm text-slate-500">POST /api/availity/eligibility. The API polls GET /availity/v1/coverages/&#123;id&#125; until statusCode is 3 or 4.</p>
         </div>
         <Field label="Payer ID">
           <input className={inputClass} required value={form.payerId} onChange={(event) => update('payerId', event.target.value)} />

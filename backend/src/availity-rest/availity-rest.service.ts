@@ -231,7 +231,46 @@ export class AvailityRestService implements OnModuleInit {
       submitterId: this.configService.get<string>('AVAILITY_SUBMITTER_ID'),
     });
 
-    return this.post('/availity/v1/coverages', payload);
+    const created = await this.post<Record<string, unknown>>('/availity/v1/coverages', payload);
+    return this.pollCoverage(created);
+  }
+
+  // Guide §4.1: statusCode 0 is in progress; 3 and 4 are complete. Poll interval of 2s is the guide's example.
+  private async pollCoverage(created: Record<string, unknown>): Promise<unknown> {
+    const id = typeof created.id === 'string' ? created.id.trim() : '';
+    if (!id || !this.isInProgress(created.statusCode)) {
+      return created;
+    }
+
+    const attempts = Number(this.configService.get<string>('AVAILITY_COVERAGE_POLL_ATTEMPTS') || 15);
+    const intervalMs = Number(this.configService.get<string>('AVAILITY_COVERAGE_POLL_INTERVAL_MS') || 2000);
+    let latest: unknown = created;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await this.sleep(intervalMs);
+      latest = await this.get<Record<string, unknown>>(`/availity/v1/coverages/${encodeURIComponent(id)}`);
+      const record = latest && typeof latest === 'object' ? (latest as Record<string, unknown>) : {};
+      if (this.isTerminalCoverage(record.statusCode) || !this.isInProgress(record.statusCode)) {
+        return latest;
+      }
+    }
+
+    throw new HttpException(
+      {
+        statusCode: HttpStatus.GATEWAY_TIMEOUT,
+        message: `Coverage ${id} did not reach statusCode 3 or 4`,
+        error: 'Gateway Timeout',
+        id,
+      },
+      HttpStatus.GATEWAY_TIMEOUT,
+    );
+  }
+
+  private isInProgress(statusCode: unknown): boolean {
+    return statusCode === 0 || statusCode === '0';
+  }
+
+  private isTerminalCoverage(statusCode: unknown): boolean {
+    return statusCode === 3 || statusCode === 4 || statusCode === '3' || statusCode === '4';
   }
 
   async submitClaimStatus(query: ClaimStatusQueryDto): Promise<unknown> {

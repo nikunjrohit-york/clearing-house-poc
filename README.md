@@ -2,24 +2,57 @@
 
 A full-stack proof-of-concept for integrating a healthcare clearinghouse (Availity) into a claims-processing pipeline. The project demonstrates the **complete closed-loop workflow**: submit real-time eligibility checks over REST, build and batch-submit 837 professional claims over SFTP, poll for acknowledgment/response files, parse those responses, and surface everything through a React/Vite admin dashboard.
 
-> **Reference:** The companion [`availity-integration-guide.md`](./availity-integration-guide.md) contains the detailed Availity vendor documentation, account-setup instructions, and gap analysis that this codebase was built against.
+> **Reference:** [`availity-integration-guide.md`](./availity-integration-guide.md) summarizes Availity case 18993019 and the Batch EDI Standard Companion Guide. The EDI guide file itself is not in this repo. Items the guide does not answer are listed in [`OPEN_QUESTIONS.md`](./OPEN_QUESTIONS.md).
+
+## Confirmed vs unconfirmed
+
+Confirmed by the case summary and the companion-guide notes in this repo:
+
+- SFTP is `qa-files.availity.com` (QA) or `files.availity.com` (production), port 22. Upload folder `/SendFiles`, download folder `/ReceiveFiles`.
+- 837 submission and 835 retrieval are batch EDI over SFTP. There is no documented webhook; the poller is the only file-discovery path.
+- Real-time eligibility uses `POST /availity/v1/coverages` and, when `statusCode` is `0`, polls `GET /availity/v1/coverages/{id}` until `3` or `4`.
+- Standard claim status uses `POST /v1/claim-statuses` and `GET /v1/claim-statuses/{id}`.
+- ISA/GS delimiters are `*`, `:`, `~`, and `^`. ISA15 is `T` on QA and `P` in production. A mismatched host and indicator refuses to build unless `AVAILITY_ALLOW_ENV_MISMATCH=true`.
+- Interchange control numbers are persisted outside Jest so a restarted process does not reuse ISA13.
+
+Unconfirmed, and not guessed in code:
+
+- The exact pipe-delimited column order beyond the rows this parser already accepts (patient, date, control number, charge, billing id, status, then 3e/3w/3a/3c notes).
+- Which payer IDs mean Medicare for the SSN edit, and which procedure codes require CR5 or CR6. Those claims are rejected when the caller sets `oxygenTherapy` or `homeHealth`.
+- Whether the OAuth path is `/availity/v1/token` (what this POC calls, and what answered the sandbox) or `/v1/token` (the curl in the integration guide).
 
 ---
 
 ## Table of Contents
 
-1. [Background — Why Two Paths?](#background---why-two-paths)
-2. [Architecture Overview](#architecture-overview)
-3. [Project Structure](#project-structure)
-4. [Technology Stack](#technology-stack)
-5. [Prerequisites](#prerequisites)
-6. [Quick Start](#quick-start)
-7. [Configuration](#configuration)
-8. [Backend API Reference](#backend-api-reference)
-9. [Data Flows](#data-flows)
-10. [Testing](#testing)
-11. [Frontend](#frontend)
-12. [Key Concepts Glossary](#key-concepts-glossary)
+1. [Process and API map](#process-and-api-map)
+2. [Background — Why Two Paths?](#background---why-two-paths)
+3. [Architecture Overview](#architecture-overview)
+4. [Project Structure](#project-structure)
+5. [Technology Stack](#technology-stack)
+6. [Prerequisites](#prerequisites)
+7. [Quick Start](#quick-start)
+8. [Configuration](#configuration)
+9. [Backend API Reference](#backend-api-reference)
+10. [Data Flows](#data-flows)
+11. [Testing](#testing)
+12. [Frontend](#frontend)
+13. [Key Concepts Glossary](#key-concepts-glossary)
+
+---
+
+## Process and API map
+
+| Process | Application API | Availity API / Channel | How it works |
+|---|---|---|---|
+| OAuth Authentication | Internal service call | `POST /availity/v1/token` | Client credentials → cache token → refresh before expiry → retry once on 401 |
+| Real-time Eligibility | `POST /api/availity/eligibility` | `POST /availity/v1/coverages`, then `GET /availity/v1/coverages/{id}` | Submit inquiry → poll while `statusCode=0` → return benefits at `3` or `4` |
+| 837P Claim Submission | `POST /api/availity/claims/batch-submit` | SFTP `/SendFiles` | Validate claim → generate X12 837P → upload `BATCH_<ICN>.txt` |
+| Upload Notification | `GET /api/availity/claims/batch-status/:fileName` | SFTP `/SendFiles` | Poll for `<file>-success` or `<file>-FAILED`; parse failure reason |
+| Inbound Reports | `POST /api/availity/reports/poll`, `GET /api/availity/reports` | SFTP `/ReceiveFiles` | Poll/download → deduplicate → parse IBR, IBRP, EBR, DPR, 999 and TA1 → display reports |
+| Claim Status | `POST /api/availity/claim-status`, `GET /api/availity/claim-status/:id` | `POST /v1/claim-statuses`, `GET /v1/claim-statuses/{id}` | Submit claim-status inquiry → receive ID → retrieve latest result |
+| ERA / 835 | No application API yet | SFTP `/ReceiveFiles` | Available after payer enrollment; complete 835 parser is not implemented |
+| SFTP Environments | Internal SFTP service | QA: `qa-files.availity.com:22`, Prod: `files.availity.com:22` | Fresh connection per operation using password or private key; always closed afterward |
 
 ---
 

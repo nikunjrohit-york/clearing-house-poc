@@ -128,4 +128,16 @@ describe('EdiParserService', () => {
     expect(report.transactions[0].elementErrors[0].elementPosition).toBe('');
     expect(report.rowErrors.some((error) => error.includes('IK4'))).toBe(true);
   });
+
+  it('keeps 3a and 3c notes on the claim and parses a TA1 interchange number', () => {
+    const pipe = parser.parse(
+      ['1|2026-09-28|BAT-1|FCN-1|1|1|0', '3|DOE, JOHN|20260920|PCN-1|A', '3a|Payer|A1|Adjudicated', '3c|Availity|C1|Clean claim'].join('\n'),
+      'batch.ebr',
+    ) as PipeDelimitedReport;
+    expect(pipe.claims[0].adjudications[0]).toMatchObject({ code: 'A1', message: 'Adjudicated' });
+    expect(pipe.claims[0].cleanNotes[0]).toMatchObject({ code: 'C1' });
+
+    const ta1 = parser.parse('TA1*000000099*260928*1435*R*025~', 'batch.ta1');
+    expect(ta1).toMatchObject({ reportType: 'TA1', interchangeControlNumber: '000000099', acknowledgmentCode: 'R', noteCode: '025' });
+  });
 });

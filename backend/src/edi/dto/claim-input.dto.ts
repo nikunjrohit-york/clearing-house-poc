@@ -9,6 +9,7 @@ import {
   IsNotEmpty,
   Min,
   ArrayMinSize,
+  IsBoolean,
   Validate,
   ValidateIf,
   ValidationArguments,
@@ -405,4 +406,13 @@ export class ClaimInputDto {
   @IsOptional()
   @IsString()
   dischargeStatus?: string;
+
+  // UNCONFIRMED: which procedure codes require CR5/CR6. Callers set these flags; incomplete segments are rejected.
+  @IsOptional()
+  @IsBoolean()
+  oxygenTherapy?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  homeHealth?: boolean;
 }

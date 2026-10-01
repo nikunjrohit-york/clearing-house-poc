@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 
 export function Spinner({ label }: { label: string }) {
   return (
@@ -26,8 +26,46 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+export function SampleButtons({ onSample, onClear }: { onSample: () => void; onClear: () => void }) {
+  return (
+    <div className="flex gap-4 text-sm font-medium">
+      <button type="button" onClick={onSample} className="text-availity-600 hover:text-availity-700">
+        Load sandbox sample
+      </button>
+      <button type="button" onClick={onClear} className="text-slate-500 hover:text-slate-700">
+        Clear
+      </button>
+    </div>
+  );
+}
+
 export const inputClass =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none ring-availity-500 focus:border-availity-500 focus:ring-2';
+
+export function RawJson({ value }: { value: unknown }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button type="button" onClick={() => setOpen(!open)} className="text-sm font-medium text-availity-600 hover:text-availity-700">
+        {open ? 'Hide raw JSON' : 'Show raw JSON'}
+      </button>
+      {open ? (
+        <pre className="mt-2 max-h-96 overflow-auto rounded-xl bg-slate-950 p-4 text-xs text-slate-100">
+          {JSON.stringify(value, (key, item) => (key === 'client_id' || key === 'client_secret' || key === 'access_token' ? '***' : item), 2)}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
+export function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl bg-slate-50 px-4 py-3">
+      <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</dt>
+      <dd className="mt-1 break-all text-base font-semibold text-slate-900">{value || 'Not returned'}</dd>
+    </div>
+  );
+}
 
 export function Badge({ tone, children }: { tone: 'green' | 'red' | 'amber' | 'slate'; children: ReactNode }) {
   const tones = {

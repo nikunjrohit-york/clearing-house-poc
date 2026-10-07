@@ -40,6 +40,13 @@ import * as Joi from 'joi';
         PORT: Joi.number().port().default(3000),
         NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
         LOG_LEVEL: Joi.string().valid('error', 'warn', 'info', 'debug').default('debug'),
+        OPTUM_CLIENT_ID: Joi.string().allow('').default(''),
+        OPTUM_CLIENT_SECRET: Joi.string().allow('').default(''),
+        OPTUM_BASE_URL: Joi.string().uri().default('https://sandbox-apigw.optum.com'),
+        OPTUM_TOKEN_URL: Joi.string().uri().default('https://sandbox-apigw.optum.com/apip/auth/v2/token'),
+        OPTUM_TRADING_PARTNER_ID: Joi.string().default('87726'),
+        OPTUM_277_REPORT_ID: Joi.string().default('X3000000.XX'),
+        OPTUM_835_REPORT_ID: Joi.string().default('R5000000.WA'),
       }).custom((value, helpers) => {
         const host = String(value.AVAILITY_SFTP_HOST || '');
         const usage = String(value.AVAILITY_USAGE_INDICATOR || 'T');

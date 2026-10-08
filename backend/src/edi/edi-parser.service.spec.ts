@@ -72,8 +72,8 @@ describe('EdiParserService', () => {
     const report = parser.parse(content, 'batch.ebr') as PipeDelimitedReport;
 
     expect(report.reportType).toBe('EBR');
-    expect(report.claims).toHaveLength(2);
-    expect(report.claims[1]).toMatchObject({ patientControlNumber: 'PCN-9', status: 'A' });
+    expect(report.claims).toHaveLength(1);
+    expect(report.claims[0]).toMatchObject({ patientControlNumber: 'PCN-9', status: 'A' });
     expect(report.rowErrors.some((error) => error.includes('Line 2'))).toBe(true);
   });
 

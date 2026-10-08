@@ -16,7 +16,11 @@ export class OptumApiClient {
     private readonly auth: OptumAuthService,
     configService: ConfigService,
   ) {
-    const baseURL = (configService.get<string>('OPTUM_BASE_URL') ?? 'https://sandbox-apigw.optum.com').replace(/\/+$/, '');
+    const configured = configService.get<string>('OPTUM_BASE_URL')?.trim();
+    if (!configured) {
+      throw new Error('OPTUM_BASE_URL is required');
+    }
+    const baseURL = configured.replace(/\/+$/, '');
     this.http = axios.create({
       baseURL,
       timeout: 30000,

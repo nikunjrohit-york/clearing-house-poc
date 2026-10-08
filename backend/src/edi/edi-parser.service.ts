@@ -301,8 +301,12 @@ export class EdiParserService {
             break;
           }
           case '3': {
-            currentClaim = this.parseClaim(parts, lineNumber, rowErrors);
-            claims.push(currentClaim);
+            const parsedClaim = this.parseClaim(parts, lineNumber, rowErrors);
+            if (!parsedClaim) {
+              break;
+            }
+            currentClaim = parsedClaim;
+            claims.push(parsedClaim);
             break;
           }
           case '3e': {
@@ -355,11 +359,9 @@ export class EdiParserService {
       rowErrors.push('File header row (record type 1) is missing');
     }
 
-    const countedAccepted = claims.filter((claim) => claim.status === 'A').length;
-    const countedRejected = claims.filter((claim) => claim.status === 'R').length;
-    const totalSubmitted = header.totalSubmitted || claims.length;
-    const totalAccepted = header.totalAccepted || countedAccepted;
-    const totalRejected = header.totalRejected || countedRejected;
+    const totalSubmitted = header.totalSubmitted;
+    const totalAccepted = header.totalAccepted;
+    const totalRejected = header.totalRejected;
     const totalErrors = claims.reduce((sum, claim) => sum + claim.errors.length, 0) + unassignedErrors;
     const totalWarnings = claims.reduce((sum, claim) => sum + claim.warnings.length, 0) + unassignedWarnings;
 
@@ -418,12 +420,13 @@ export class EdiParserService {
     return { payerId: first, payerName: second };
   }
 
-  private parseClaim(parts: string[], lineNumber: number, rowErrors: string[]): PipeClaim {
+  private parseClaim(parts: string[], lineNumber: number, rowErrors: string[]): PipeClaim | null {
     const patientName = parts[1] || '';
     const dateOfService = parts[2] || '';
     const patientControlNumber = parts[3] || '';
     if (!patientName || !patientControlNumber) {
       rowErrors.push(`Line ${lineNumber}: claim row is missing patient name or patient control number`);
+      return null;
     }
 
     const statusIndex = this.findStatusIndex(parts);

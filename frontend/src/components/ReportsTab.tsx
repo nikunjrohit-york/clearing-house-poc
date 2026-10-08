@@ -145,7 +145,10 @@ export default function ReportsTab() {
     try {
       const path = refresh ? '/api/availity/reports/poll' : '/api/availity/reports';
       const response = await api<{ reports: ReportItem[] }>(path, refresh ? { method: 'POST' } : undefined);
-      setReports(response.reports ?? []);
+      if (!Array.isArray(response.reports)) {
+        throw new Error('Availity reports response did not include a reports array');
+      }
+      setReports(response.reports);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load reports');
     } finally {
@@ -191,9 +194,14 @@ export default function ReportsTab() {
 
       {error ? <ErrorAlert message={error} /> : null}
       {loading && reports.length === 0 ? <Spinner label="Loading reports..." /> : null}
-      {!loading && visible.length === 0 ? (
+      {!loading && !error && reports.length === 0 ? (
         <p className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm text-slate-500">
-          {filter === 'all' ? 'No reports yet.' : `No ${filter} reports yet.`}
+          No reports received from Availity yet.
+        </p>
+      ) : null}
+      {!loading && !error && reports.length > 0 && visible.length === 0 ? (
+        <p className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm text-slate-500">
+          No {filter} reports in the files Availity has sent.
         </p>
       ) : null}
 

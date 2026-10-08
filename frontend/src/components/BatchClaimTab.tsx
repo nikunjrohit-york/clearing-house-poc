@@ -343,7 +343,10 @@ export default function BatchClaimTab() {
 }
 
 function StatusBadge({ notice, polling }: { notice: NotificationStatus | null; polling: boolean }) {
-  if (!notice || (notice.status === 'PENDING' && polling)) {
+  if (!notice) {
+    return null;
+  }
+  if (notice.status === 'PENDING' && polling) {
     return <Badge tone="amber">Pending</Badge>;
   }
   if (notice.status === 'SUCCESS') {

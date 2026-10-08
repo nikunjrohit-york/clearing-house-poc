@@ -210,7 +210,7 @@ function PayerBenefits({ data }: { data: unknown }) {
               </span>
             </span>
             <span className="text-right text-xs text-slate-500">
-              {Object.entries(row.benefitsDateInformation ?? {})
+              {Object.entries(row.benefitsDateInformation && typeof row.benefitsDateInformation === 'object' ? row.benefitsDateInformation : {})
                 .map(([kind, range]) => `${kind} ${range}`)
                 .join(', ')}
             </span>

@@ -4,19 +4,73 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { AppModule } from '../app.module';
 import { AvailityRestService } from '../availity-rest/availity-rest.service';
-import {
-  SAMPLE_BATCH_ID,
-  claimStatusQuery,
-  eligibilityInquiry,
-  professionalClaim,
-  sample999,
-  sampleEbr,
-  sampleIbr,
-} from '../common/mock-data.seed';
-import { EdiParserService } from '../edi/edi-parser.service';
+import { ClaimStatusQueryDto } from '../availity-rest/dto/claim-status-query.dto';
+import { CoverageInquiryDto } from '../availity-rest/dto/coverage-inquiry.dto';
+import { ClaimFrequencyCode, ClaimInputDto, ClaimType, PlaceOfService } from '../edi/dto/claim-input.dto';
 import { X12BuilderService } from '../edi/x12-builder.service';
 import { SftpPollerCron } from '../sftp/sftp-poller.cron';
 import { SftpService } from '../sftp/sftp.service';
+
+const eligibilityInquiry: CoverageInquiryDto = {
+  payerId: '00001',
+  memberId: 'MEM8941029',
+  patientFirstName: 'JOHN',
+  patientLastName: 'DOE',
+  patientBirthDate: '1985-04-12',
+  patientGender: 'M',
+  serviceTypeCode: '30',
+  providerNpi: '1234567893',
+  serviceDate: '2026-09-10',
+};
+
+const claimStatusQuery: ClaimStatusQueryDto = {
+  payerId: '00001',
+  providerNpi: '1234567893',
+  memberId: 'MEM8941029',
+  patientFirstName: 'JOHN',
+  patientLastName: 'DOE',
+  patientBirthDate: '1985-04-12',
+  patientControlNumber: 'PCN-2023-001',
+  serviceDate: '2026-09-10',
+};
+
+function professionalClaim(claimControlNumber: string): ClaimInputDto {
+  return {
+    claimType: ClaimType.PROFESSIONAL,
+    tradingPartnerId: '00001',
+    claimControlNumber,
+    frequencyCode: ClaimFrequencyCode.ORIGINAL,
+    billingProvider: {
+      npi: '1234567893',
+      taxId: '12-3456789',
+      name: 'RIVERSIDE FAMILY CLINIC',
+      address1: '1200 RIVERPLACE BLVD',
+      city: 'JACKSONVILLE',
+      state: 'FL',
+      zip: '32207',
+    },
+    subscriber: {
+      memberId: 'MEM8941029',
+      firstName: 'JOHN',
+      lastName: 'DOE',
+      dateOfBirth: '1985-04-12',
+      gender: 'M',
+    },
+    diagnoses: [{ code: 'J06.9' }],
+    serviceLines: [
+      {
+        lineNumber: 1,
+        serviceDate: '2026-09-10',
+        procedureCode: '99213',
+        quantity: 1,
+        unitPrice: 150,
+        diagnosisPointer: '1',
+        placeOfService: PlaceOfService.OFFICE,
+      },
+    ],
+    totalCharge: 150,
+  };
+}
 
 interface StepResult {
   name: string;
@@ -36,7 +90,6 @@ let restService: AvailityRestService;
 let x12Builder: X12BuilderService;
 let sftpService: SftpService;
 let poller: SftpPollerCron;
-let parser: EdiParserService;
 let lastEdi = '';
 let lastFileName = '';
 
@@ -109,40 +162,16 @@ async function runSftpUpload(): Promise<void> {
 }
 
 async function runInbound(): Promise<void> {
-  let liveError = '';
-  try {
-    console.log('Polling /ReceiveFiles/');
-    const polled = await poller.pollReceiveFiles();
-    printJson(
-      'Inbound poll',
-      polled.map((item) => ({
-        fileName: item.fileName,
-        modifiedAt: item.modifiedAt,
-        summary: item.summary,
-      })),
-    );
-  } catch (error) {
-    liveError = error instanceof Error ? error.message : 'Inbound poll failed';
-    console.log(`Live /ReceiveFiles poll did not complete: ${liveError}`);
-    console.log(`Parsing offline samples for batch ${SAMPLE_BATCH_ID}.`);
-  }
-
-  const samples = [
-    { fileName: 'batch.ibr', content: sampleIbr },
-    { fileName: 'batch.ebr', content: sampleEbr },
-    { fileName: 'ack.999', content: sample999 },
-  ];
-  for (const sample of samples) {
-    const parsed = parser.parse(sample.content, sample.fileName);
-    printJson(sample.fileName, {
-      summary: parser.summarize(parsed),
-      parsed,
-    });
-  }
-
-  if (liveError) {
-    throw new Error(liveError);
-  }
+  console.log('Polling /ReceiveFiles/');
+  const polled = await poller.pollReceiveFiles();
+  printJson(
+    'Inbound poll',
+    polled.map((item) => ({
+      fileName: item.fileName,
+      modifiedAt: item.modifiedAt,
+      summary: item.summary,
+    })),
+  );
 }
 
 async function runClaimStatus(): Promise<void> {
@@ -197,7 +226,6 @@ async function main() {
   x12Builder = app.get(X12BuilderService);
   sftpService = app.get(SftpService);
   poller = app.get(SftpPollerCron);
-  parser = app.get(EdiParserService);
 
   try {
     const choice = await choose();

@@ -80,6 +80,7 @@ export class SftpPollerCron {
           failed += 1;
           const message = error instanceof Error ? error.message : 'Unknown parse error';
           this.logger.error(JSON.stringify({ event: 'receive-file-failed', fileName: file.fileName, message }));
+          throw error;
         }
       }
 

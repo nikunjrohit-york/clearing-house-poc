@@ -1,5 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { OptumApiClient, OptumResponse } from './optum-api.client';
 import { OptumAuthService } from './optum-auth.service';
 import {
@@ -10,14 +9,11 @@ import {
   OptumRequestError,
   RemittanceModel,
   Report277Model,
-  claimStatusRequest,
-  eligibilityRequest,
   parse277,
   parse835,
   parseClaimStatus,
   parseClaimSubmission,
   parseEligibility,
-  professionalClaimRequest,
   reportIds,
 } from './optum.contracts';
 
@@ -36,7 +32,6 @@ export class RcmWorkflowService {
   constructor(
     private readonly auth: OptumAuthService,
     private readonly client: OptumApiClient,
-    private readonly configService: ConfigService,
   ) {}
 
   async authenticate(): Promise<StepAudit<{ tokenType: string; expiresAt: string }>> {
@@ -50,7 +45,7 @@ export class RcmWorkflowService {
   }
 
   async checkEligibility(body?: Record<string, unknown>): Promise<StepAudit<EligibilityModel>> {
-    const request = this.payload(body, eligibilityRequest(this.configService.get<string>('OPTUM_TRADING_PARTNER_ID') || '87726'));
+    const request = this.requireBody(body);
     const response = await this.invoke<Record<string, unknown>>('eligibility', () =>
       this.client.post('/medicalnetwork/eligibility/v3', request),
     );
@@ -66,7 +61,10 @@ export class RcmWorkflowService {
   }
 
   async fetch277(reportId?: string): Promise<StepAudit<Report277Model>> {
-    const filename = reportId || this.configService.get<string>('OPTUM_277_REPORT_ID') || 'X3000000.XX';
+    const filename = reportId?.trim();
+    if (!filename) {
+      throw new BadRequestException('277 report id is required');
+    }
     const response = await this.invoke<unknown>('277', () =>
       this.client.get(`/medicalnetwork/reports/v2/${encodeURIComponent(filename)}/277`),
     );
@@ -79,13 +77,16 @@ export class RcmWorkflowService {
   }
 
   async queryClaimStatus(body?: Record<string, unknown>): Promise<StepAudit<ClaimStatusModel>> {
-    const request = this.payload(body, claimStatusRequest());
+    const request = this.requireBody(body);
     const response = await this.invoke<unknown>('claim-status', () => this.client.post('/medicalnetwork/claimstatus/v2', request));
     return this.success('claim-status', [response], parseClaimStatus(response.data));
   }
 
   async fetch835(reportId?: string): Promise<StepAudit<RemittanceModel>> {
-    const filename = reportId || this.configService.get<string>('OPTUM_835_REPORT_ID') || 'R5000000.WA';
+    const filename = reportId?.trim();
+    if (!filename) {
+      throw new BadRequestException('835 report id is required');
+    }
     const response = await this.invoke<unknown>('835', () =>
       this.client.get(`/medicalnetwork/reports/v2/${encodeURIComponent(filename)}/835`),
     );
@@ -93,7 +94,7 @@ export class RcmWorkflowService {
   }
 
   private professionalClaim(action: 'validation' | 'submission', body?: Record<string, unknown>): Promise<StepAudit<ClaimSubmissionModel>> {
-    const request = this.payload(body, professionalClaimRequest());
+    const request = this.requireBody(body);
     return this.invoke<Record<string, unknown>>('professional-claim', () =>
       this.client.post(`/medicalnetwork/professionalclaims/v3/${action}`, request),
     ).then((response) => this.success(action === 'validation' ? 'claim-validation' : 'professional-claim', [response], parseClaimSubmission(response.data)));
@@ -117,7 +118,10 @@ export class RcmWorkflowService {
     return error;
   }
 
-  private payload(body: Record<string, unknown> | undefined, fallback: Record<string, unknown>): Record<string, unknown> {
-    return body && Object.keys(body).length > 0 ? body : fallback;
+  private requireBody(body: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (!body || Object.keys(body).length === 0) {
+      throw new BadRequestException('Request body is required');
+    }
+    return body;
   }
 }

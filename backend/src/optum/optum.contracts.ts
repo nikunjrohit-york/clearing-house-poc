@@ -113,7 +113,7 @@ export interface RemittanceModel {
   remarkCodes: string[];
 }
 
-export function eligibilityRequest(tradingPartnerServiceId = '87726'): Record<string, unknown> {
+export function eligibilityRequest(tradingPartnerServiceId: string): Record<string, unknown> {
   return {
     controlNumber: '123456789',
     tradingPartnerServiceId,
@@ -252,7 +252,7 @@ export function professionalClaimRequest(): Record<string, unknown> {
   };
 }
 
-export function claimStatusRequest(submittedAmount = '28.75'): Record<string, unknown> {
+export function claimStatusRequest(submittedAmount: string): Record<string, unknown> {
   return {
     controlNumber: '000000001',
     tradingPartnerServiceId: 'serviceId',

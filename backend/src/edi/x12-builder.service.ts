@@ -23,8 +23,6 @@ import {
 } from './dto/claim-input.dto';
 
 const PROFESSIONAL_VERSION = '005010X222A1';
-const DEFAULT_SUBMITTER_ID = 'AV09311993';
-const DEFAULT_RECEIVER_ID = '030240928';
 
 @Injectable()
 export class X12BuilderService {
@@ -99,11 +97,27 @@ export class X12BuilderService {
   }
 
   private submitterId(): string {
-    return this.text(this.configService.get<string>('AVAILITY_SUBMITTER_ID') || DEFAULT_SUBMITTER_ID);
+    return this.requiredConfig('AVAILITY_SUBMITTER_ID');
   }
 
   private receiverId(): string {
-    return this.text(this.configService.get<string>('AVAILITY_RECEIVER_ID') || DEFAULT_RECEIVER_ID);
+    return this.requiredConfig('AVAILITY_RECEIVER_ID');
+  }
+
+  private requiredConfig(key: string): string {
+    const value = this.text(this.configService.get<string>(key));
+    if (!value) {
+      throw new BadRequestException(`${key} is required`);
+    }
+    return value;
+  }
+
+  private requiredText(value: string | undefined | null, label: string): string {
+    const text = this.text(value);
+    if (!text) {
+      throw new BadRequestException(`${label} is required`);
+    }
+    return text;
   }
 
   private usageIndicator(): 'T' | 'P' {
@@ -170,7 +184,10 @@ export class X12BuilderService {
   }
 
   private assertEnvelopeEnvironment(): void {
-    const host = this.configService.get<string>('AVAILITY_SFTP_HOST') || 'qa-files.availity.com';
+    const host = this.configService.get<string>('AVAILITY_SFTP_HOST')?.trim();
+    if (!host) {
+      throw new BadRequestException('AVAILITY_SFTP_HOST is required');
+    }
     const usage = this.usageIndicator();
     if (this.configService.get<string>('AVAILITY_ALLOW_ENV_MISMATCH') === 'true') {
       return;
@@ -363,7 +380,7 @@ export class X12BuilderService {
     const now = new Date();
     const date = this.formatDate8(now);
     const time = this.formatTime4(now);
-    const controlNumber = dto.referenceId || 'ELIG';
+    const controlNumber = this.requiredText(dto.referenceId, 'Eligibility reference id');
     const provider = dto.provider as ProviderInfo;
     const subscriber = dto.subscriber as SubscriberInfo;
     const body: string[] = [
@@ -371,13 +388,13 @@ export class X12BuilderService {
       this.seg('HL', ['1', '', '20', '1']),
       this.seg('NM1', ['PR', '2', 'INFORMATION SOURCE', '', '', '', '', '46', this.text(dto.tradingPartnerId)]),
       this.seg('HL', ['2', '1', '21', '1']),
-      this.seg('NM1', ['1P', '2', this.text(provider.name || 'PROVIDER NAME'), '', '', '', '', 'XX', this.text(provider.npi)]),
+      this.seg('NM1', ['1P', '2', this.requiredText(provider.name, 'Provider name'), '', '', '', '', 'XX', this.text(provider.npi)]),
       this.seg('HL', ['3', '2', '22', dto.dependent ? '1' : '0']),
       this.seg('NM1', [
         'IL',
         '1',
-        this.text(subscriber.lastName || 'LASTNAME'),
-        this.text(subscriber.firstName || 'FIRSTNAME'),
+        this.requiredText(subscriber.lastName, 'Subscriber last name'),
+        this.requiredText(subscriber.firstName, 'Subscriber first name'),
         '',
         '',
         '',
@@ -431,11 +448,13 @@ export class X12BuilderService {
     const time = this.formatTime4(now);
     const billing = claim.billingProvider as ClaimProvider;
     const subscriber = claim.subscriber as ClaimSubscriber;
-    const placeOfService = this.text(claim.serviceLines.find((line) => line.placeOfService)?.placeOfService || PlaceOfService.OFFICE);
+    const placeOfService = this.requiredText(
+      claim.serviceLines.find((line) => line.placeOfService)?.placeOfService,
+      'Place of service',
+    );
     const body: string[] = [
       this.seg('BHT', ['0019', '00', this.text(claim.claimControlNumber), date, time, 'CH']),
-      this.seg('NM1', ['41', '2', 'INTEGRATION POC HEALTH', '', '', '', '', '46', this.submitterId()]),
-      this.seg('PER', ['IC', 'EDI OPERATIONS', 'TE', '8005551212']),
+      this.seg('NM1', ['41', '2', this.requiredText(billing.name, 'Billing provider name'), '', '', '', '', '46', this.submitterId()]),
       this.seg('NM1', ['40', '2', 'AVAILITY', '', '', '', '', '46', this.receiverId()]),
       ...this.billingProviderLoops(billing),
       ...this.subscriberLoops(claim, subscriber),
@@ -468,7 +487,7 @@ export class X12BuilderService {
         this.seg('NM1', [
           '82',
           '2',
-          this.text(claim.renderingProvider.name || 'RENDERING PROVIDER'),
+          this.requiredText(claim.renderingProvider.name, 'Rendering provider name'),
           '',
           '',
           '',
@@ -494,7 +513,7 @@ export class X12BuilderService {
       segments.push(this.seg('PRV', ['BI', 'PXC', this.text(billing.specialty)]));
     }
     segments.push(
-      this.seg('NM1', ['85', '2', this.text(billing.name || 'BILLING PROVIDER'), '', '', '', '', 'XX', this.text(billing.npi)]),
+      this.seg('NM1', ['85', '2', this.requiredText(billing.name, 'Billing provider name'), '', '', '', '', 'XX', this.text(billing.npi)]),
     );
     if (billing.address1) {
       segments.push(this.seg('N3', [this.text(billing.address1), this.text(billing.address2)]));
@@ -545,7 +564,7 @@ export class X12BuilderService {
   private dependentLoops(dependent: ClaimDependent): string[] {
     return [
       this.seg('HL', ['3', '2', '23', '0']),
-      this.seg('PAT', [this.text(dependent.relationship || '19')]),
+      this.seg('PAT', [this.requiredText(dependent.relationship, 'Dependent relationship')]),
       this.seg('NM1', [
         'QC',
         '1',
@@ -576,7 +595,7 @@ export class X12BuilderService {
         String(line.quantity),
         '',
         '',
-        this.text(line.diagnosisPointer || '1'),
+        this.requiredText(line.diagnosisPointer, 'Diagnosis pointer'),
       ]),
       this.seg('DTP', ['472', 'D8', this.formatDate8(line.serviceDate)]),
     ];
@@ -593,21 +612,13 @@ export class X12BuilderService {
     claimControlNumber: string,
     serviceDate: string,
   ): string {
-    const now = new Date();
-    const date = this.formatDate8(now);
-    const time = this.formatTime4(now);
-    const body = [
-      this.seg('BHT', ['0010', '13', this.text(claimControlNumber), date, time]),
-      this.seg('HL', ['1', '', '20', '1']),
-      this.seg('NM1', ['PR', '2', 'PAYER NAME', '', '', '', '', '46', this.text(tradingPartnerId)]),
-      this.seg('HL', ['2', '1', '21', '1']),
-      this.seg('NM1', ['41', '2', 'PROVIDER NAME', '', '', '', '', 'XX', this.text(providerNpi)]),
-      this.seg('HL', ['3', '2', '22', '0']),
-      this.seg('NM1', ['QC', '1', 'PATIENT LAST', 'PATIENT FIRST', '', '', '', 'MI', this.text(patientId)]),
-      this.seg('HL', ['4', '3', '19', '0']),
-      this.seg('TRN', ['1', this.text(claimControlNumber)]),
-      this.seg('DTP', ['472', 'D8', this.formatDate8(serviceDate)]),
-    ];
-    return this.wrapTransaction('HR', '005010X212', '276', body);
+    void tradingPartnerId;
+    void providerNpi;
+    void patientId;
+    void claimControlNumber;
+    void serviceDate;
+    throw new BadRequestException(
+      'Refusing to build a 276 with synthesized payer, provider, or patient names. Use the Availity claim-status REST API.',
+    );
   }
 }

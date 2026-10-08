@@ -49,8 +49,17 @@ export class OptumAuthService {
   private async requestToken(): Promise<string> {
     const clientId = this.configService.get<string>('OPTUM_CLIENT_ID') ?? '';
     const clientSecret = this.configService.get<string>('OPTUM_CLIENT_SECRET') ?? '';
-    const tokenUrl =
-      this.configService.get<string>('OPTUM_TOKEN_URL') ?? 'https://sandbox-apigw.optum.com/apip/auth/v2/token';
+    const tokenUrl = this.configService.get<string>('OPTUM_TOKEN_URL')?.trim();
+    if (!tokenUrl) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: 'OPTUM_TOKEN_URL is required',
+          error: 'Configuration',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
     if (!clientId || !clientSecret) {
       throw new HttpException(
         {

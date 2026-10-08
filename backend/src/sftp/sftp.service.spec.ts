@@ -1,6 +1,6 @@
-import { BadRequestException, HttpException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SftpService } from './sftp.service';
+import { SftpOperationError, SftpService } from './sftp.service';
 
 const mockSftp = {
   connect: jest.fn(),
@@ -65,14 +65,14 @@ describe('SftpService', () => {
   it('closes the connection when the upload fails', async () => {
     mockSftp.put.mockRejectedValue(new Error('disk full'));
 
-    await expect(service().uploadBatchFile('BATCH_000000001.txt', 'ISA*00*~')).rejects.toBeInstanceOf(HttpException);
+    await expect(service().uploadBatchFile('BATCH_000000001.txt', 'ISA*00*~')).rejects.toBeInstanceOf(SftpOperationError);
     expect(mockSftp.end).toHaveBeenCalledTimes(1);
   });
 
   it('closes the socket when authentication fails', async () => {
     mockSftp.connect.mockRejectedValue(new Error('All configured authentication methods failed'));
 
-    await expect(service().uploadBatchFile('BATCH_000000001.txt', 'ISA*00*~')).rejects.toBeInstanceOf(HttpException);
+    await expect(service().uploadBatchFile('BATCH_000000001.txt', 'ISA*00*~')).rejects.toBeInstanceOf(SftpOperationError);
     expect(mockSftp.end).toHaveBeenCalledTimes(1);
     expect(mockSftp.put).not.toHaveBeenCalled();
   });
@@ -139,7 +139,7 @@ describe('SftpService', () => {
     });
   });
 
-  it('downloads regular files from /ReceiveFiles and continues after one failure', async () => {
+  it('rejects the download when one ReceiveFiles entry cannot be read', async () => {
     mockSftp.list.mockResolvedValue([
       { name: 'batch.ibr', type: '-', size: 12, modifyTime: 1_700_000_000_000 },
       { name: 'ack.999', type: '-', size: 4, modifyTime: 1_700_000_000_000 },
@@ -147,15 +147,8 @@ describe('SftpService', () => {
     ]);
     mockSftp.get.mockResolvedValueOnce(Buffer.from('1|2026-09-28|BAT|FCN|1|1|0')).mockRejectedValueOnce(new Error('read failed'));
 
-    const files = await service().downloadReceiveFiles();
-
+    await expect(service().downloadReceiveFiles()).rejects.toBeInstanceOf(SftpOperationError);
     expect(mockSftp.list).toHaveBeenCalledWith('/ReceiveFiles');
-    expect(files).toEqual([
-      expect.objectContaining({
-        fileName: 'batch.ibr',
-        content: '1|2026-09-28|BAT|FCN|1|1|0',
-      }),
-    ]);
     expect(mockSftp.end).toHaveBeenCalledTimes(1);
   });
 

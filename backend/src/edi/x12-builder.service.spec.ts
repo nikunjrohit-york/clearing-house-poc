@@ -8,6 +8,7 @@ function service(): X12BuilderService {
     AVAILITY_SUBMITTER_ID: 'AV09311993',
     AVAILITY_RECEIVER_ID: '030240928',
     AVAILITY_USAGE_INDICATOR: 'T',
+    AVAILITY_SFTP_HOST: 'qa-files.availity.com',
   };
   return new X12BuilderService({
     get: (key: string) => values[key],
@@ -82,7 +83,7 @@ describe('X12BuilderService 837P', () => {
     expect(isa.length + 1).toBe(106);
     expect(gs).toMatch(/^GS\*HC\*AV09311993\*030240928\*\d{8}\*\d{4}\*1\*X\*005010X222A1$/);
     expect(st).toBe('ST*837*000000001*005010X222A1');
-    expect(segments).toContain('NM1*41*2*INTEGRATION POC HEALTH*****46*AV09311993');
+    expect(segments).toContain('NM1*41*2*BILLING CLINIC*****46*AV09311993');
     expect(segments).toContain('NM1*40*2*AVAILITY*****46*030240928');
     expect(segments).toContain('NM1*85*2*BILLING CLINIC*****XX*1234567893');
     expect(segments).toContain('REF*EI*123456789');

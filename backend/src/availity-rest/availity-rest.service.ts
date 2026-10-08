@@ -29,16 +29,45 @@ interface RetryableRequestConfig extends InternalAxiosRequestConfig {
   _retryCount?: number;
 }
 
-const PLACEHOLDER_CLIENT_IDS = new Set(['', 'sandbox', 'your_client_id_here']);
+const TOKEN_REFRESH_BUFFER_MS = 60_000;
+
+export class AvailityRestError extends Error {
+  readonly op: string;
+  readonly upstream: string;
+  readonly statusCode: number;
+
+  constructor(op: string, err: unknown) {
+    const described = describeUpstream(err);
+    super(described.message);
+    this.name = 'AvailityRestError';
+    this.op = op;
+    this.upstream = described.upstream;
+    this.statusCode = described.statusCode;
+  }
+}
+
+export interface AvailityCoverageResponse {
+  id?: string;
+  statusCode?: number | string;
+  status?: string;
+  payerId?: string;
+  payerName?: string;
+  memberId?: string;
+  serviceType?: string;
+  procedureCode?: string;
+  plans?: unknown[];
+  coverages?: AvailityCoverageResponse[];
+  validationMessages?: unknown[];
+}
 
 @Injectable()
 export class AvailityRestService implements OnModuleInit {
   private readonly logger = new Logger(AvailityRestService.name);
   private readonly httpClient: AxiosInstance;
   private accessToken: string | null = null;
-  private tokenExpiry: number = 0;
+  private tokenExpiry = 0;
   private pendingToken: Promise<string> | null = null;
-  private readonly tokenBufferMs = 60000;
+  private readonly tokenBufferMs = TOKEN_REFRESH_BUFFER_MS;
   private readonly retryConfig: RetryConfig = {
     maxRetries: 3,
     baseDelayMs: 1000,
@@ -47,12 +76,9 @@ export class AvailityRestService implements OnModuleInit {
   };
 
   constructor(private readonly configService: ConfigService) {
-    const baseUrl = this.trimTrailingSlash(
-      this.configService.get<string>('AVAILITY_BASE_URL') ?? 'https://api.availity.com',
-    );
-
+    const baseUrl = this.requiredConfig('AVAILITY_BASE_URL');
     this.httpClient = axios.create({
-      baseURL: baseUrl,
+      baseURL: baseUrl.replace(/\/+$/, ''),
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
@@ -69,8 +95,7 @@ export class AvailityRestService implements OnModuleInit {
         if (status === 401 && config && !config._retry) {
           config._retry = true;
           const token = await this.getAuthToken(true);
-          config.headers = config.headers || {};
-          config.headers.Authorization = `Bearer ${token}`;
+          this.assignAuthorization(config, token);
           return this.httpClient.request(config);
         }
 
@@ -86,8 +111,7 @@ export class AvailityRestService implements OnModuleInit {
           );
           await this.sleep(delay);
           const token = await this.getAuthToken();
-          config.headers = config.headers || {};
-          config.headers.Authorization = `Bearer ${token}`;
+          this.assignAuthorization(config, token);
           return this.httpClient.request(config);
         }
 
@@ -96,38 +120,14 @@ export class AvailityRestService implements OnModuleInit {
     );
   }
 
-  private isRetryableError(status: number | undefined): boolean {
-    return status !== undefined && this.retryConfig.retryableStatuses.includes(status);
-  }
-
-  private calculateBackoff(attempt: number): number {
-    const delay = this.retryConfig.baseDelayMs * Math.pow(2, attempt - 1);
-    const jitter = Math.random() * 0.3 * delay;
-    return Math.min(delay + jitter, this.retryConfig.maxDelayMs);
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private trimTrailingSlash(value: string): string {
-    return value.replace(/\/+$/, '');
-  }
-
-  async onModuleInit() {
-    const clientId = this.configService.get<string>('AVAILITY_CLIENT_ID') ?? '';
-    if (PLACEHOLDER_CLIENT_IDS.has(clientId)) {
-      this.logger.warn(
-        'Availity OAuth credentials are sandbox placeholders. A token will be requested on the first API call.',
-      );
-      return;
-    }
-
+  async onModuleInit(): Promise<void> {
     try {
       await this.getAuthToken();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown token error';
-      this.logger.error(`Availity token prefetch failed. The next API call will retry. ${message}`);
+      if (error instanceof AvailityRestError) {
+        throw error;
+      }
+      throw new AvailityRestError('getAuthToken', error);
     }
   }
 
@@ -151,126 +151,21 @@ export class AvailityRestService implements OnModuleInit {
     }
   }
 
-  private async requestToken(): Promise<string> {
-    const tokenUrl =
-      this.configService.get<string>('AVAILITY_TOKEN_URL') ?? 'https://api.availity.com/availity/v1/token';
-    const clientId = this.configService.get<string>('AVAILITY_CLIENT_ID') ?? '';
-    const clientSecret = this.configService.get<string>('AVAILITY_CLIENT_SECRET') ?? '';
-    const realm = this.configService.get<string>('AVAILITY_REALM') ?? '';
-    const scope = this.configService.get<string>('AVAILITY_SCOPE') ?? '';
-
-    if (!clientId || !clientSecret) {
-      throw new HttpException(
-        {
-          statusCode: HttpStatus.UNAUTHORIZED,
-          message: 'Availity OAuth credentials are not configured',
-          error: 'Unauthorized',
-        },
-        HttpStatus.UNAUTHORIZED,
-      );
-    }
-
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', clientId);
-    params.append('client_secret', clientSecret);
-    if (realm) {
-      params.append('realm', realm);
-    }
-    if (scope) {
-      params.append('scope', scope);
-    }
-
+  async checkEligibility(query: CoverageInquiryDto): Promise<AvailityCoverageResponse> {
     try {
-      const response = await axios.post<TokenResponse>(tokenUrl, params, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-        timeout: 30000,
+      const created = await this.post<AvailityCoverageResponse>('/availity/v1/coverages', this.coverageForm(query), {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
       });
-
-      if (!response.data?.access_token) {
-        throw new HttpException(
-          {
-            statusCode: HttpStatus.BAD_GATEWAY,
-            message: 'Availity token response did not include an access_token',
-            error: 'Bad Gateway',
-          },
-          HttpStatus.BAD_GATEWAY,
-        );
-      }
-
-      const expiresIn = response.data.expires_in || 300;
-      this.accessToken = response.data.access_token;
-      this.tokenExpiry = Date.now() + expiresIn * 1000;
-      this.logger.log(`Obtained Availity access token. Expires in ${expiresIn}s`);
-      return this.accessToken;
+      return await this.pollCoverage(this.unwrapCoverage(created));
     } catch (error) {
-      this.logger.error(`Failed to obtain Availity access token: ${this.errorSummary(error)}`);
-      throw this.toHttpException(error, 'Availity authentication failed');
-    }
-  }
-
-  private async getAuthHeaders(): Promise<Record<string, string>> {
-    const token = await this.getAuthToken();
-    return {
-      Authorization: `Bearer ${token}`,
-    };
-  }
-
-  async checkEligibility(query: CoverageInquiryDto): Promise<unknown> {
-    const serviceType = query.serviceTypeCode || '30';
-    const payload = this.omitEmpty({
-      payerId: query.payerId,
-      memberId: query.memberId,
-      serviceType,
-      asOfDate: query.asOfDate || new Date().toISOString().slice(0, 10),
-      patientFirstName: query.patientFirstName,
-      patientLastName: query.patientLastName,
-      patientBirthDate: query.patientBirthDate,
-      patientGender: query.patientGender,
-      providerNpi: query.providerNpi,
-      submitterId: this.configService.get<string>('AVAILITY_SUBMITTER_ID'),
-    });
-
-    const created = await this.post<Record<string, unknown>>('/availity/v1/coverages', payload);
-    return this.pollCoverage(created);
-  }
-
-  // Guide §4.1: statusCode 0 is in progress; 3 and 4 are complete. Poll interval of 2s is the guide's example.
-  private async pollCoverage(created: Record<string, unknown>): Promise<unknown> {
-    const id = typeof created.id === 'string' ? created.id.trim() : '';
-    if (!id || !this.isInProgress(created.statusCode)) {
-      return created;
-    }
-
-    const attempts = Number(this.configService.get<string>('AVAILITY_COVERAGE_POLL_ATTEMPTS') || 15);
-    const intervalMs = Number(this.configService.get<string>('AVAILITY_COVERAGE_POLL_INTERVAL_MS') || 2000);
-    let latest: unknown = created;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      await this.sleep(intervalMs);
-      latest = await this.get<Record<string, unknown>>(`/availity/v1/coverages/${encodeURIComponent(id)}`);
-      const record = latest && typeof latest === 'object' ? (latest as Record<string, unknown>) : {};
-      if (this.isTerminalCoverage(record.statusCode) || !this.isInProgress(record.statusCode)) {
-        return latest;
+      if (error instanceof AvailityRestError || error instanceof HttpException) {
+        throw error;
       }
+      throw new AvailityRestError('checkEligibility', error);
     }
-
-    throw new HttpException(
-      {
-        statusCode: HttpStatus.GATEWAY_TIMEOUT,
-        message: `Coverage ${id} did not reach statusCode 3 or 4`,
-        error: 'Gateway Timeout',
-        id,
-      },
-      HttpStatus.GATEWAY_TIMEOUT,
-    );
-  }
-
-  private isInProgress(statusCode: unknown): boolean {
-    return statusCode === 0 || statusCode === '0';
-  }
-
-  private isTerminalCoverage(statusCode: unknown): boolean {
-    return statusCode === 3 || statusCode === 4 || statusCode === '3' || statusCode === '4';
   }
 
   async submitClaimStatus(query: ClaimStatusQueryDto): Promise<unknown> {
@@ -308,22 +203,25 @@ export class AvailityRestService implements OnModuleInit {
 
   async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const headers = await this.getAuthHeaders();
-    return this.execute(() => this.httpClient.get<T>(url, { ...config, headers }));
+    return this.execute(`GET ${url}`, () => this.httpClient.get<T>(url, { ...config, headers }));
   }
 
   async post<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
-    const headers = await this.getAuthHeaders();
-    return this.execute(() => this.httpClient.post<T>(url, data, { ...config, headers }));
+    const headers = {
+      ...(config?.headers && typeof config.headers === 'object' ? config.headers : {}),
+      ...(await this.getAuthHeaders()),
+    };
+    return this.execute(`POST ${url}`, () => this.httpClient.post<T>(url, data, { ...config, headers }));
   }
 
   async put<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
     const headers = await this.getAuthHeaders();
-    return this.execute(() => this.httpClient.put<T>(url, data, { ...config, headers }));
+    return this.execute(`PUT ${url}`, () => this.httpClient.put<T>(url, data, { ...config, headers }));
   }
 
   async delete<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const headers = await this.getAuthHeaders();
-    return this.execute(() => this.httpClient.delete<T>(url, { ...config, headers }));
+    return this.execute(`DELETE ${url}`, () => this.httpClient.delete<T>(url, { ...config, headers }));
   }
 
   async postX12<T>(url: string, x12Data: string, config?: AxiosRequestConfig): Promise<T> {
@@ -332,7 +230,7 @@ export class AvailityRestService implements OnModuleInit {
       'Content-Type': 'application/edi-x12',
       Accept: 'application/edi-x12',
     };
-    return this.execute(() => this.httpClient.post<T>(url, x12Data, { ...config, headers }));
+    return this.execute(`POST ${url}`, () => this.httpClient.post<T>(url, x12Data, { ...config, headers }));
   }
 
   getToken(): string | null {
@@ -343,12 +241,196 @@ export class AvailityRestService implements OnModuleInit {
     return this.accessToken !== null && Date.now() < this.tokenExpiry - this.tokenBufferMs;
   }
 
-  private async execute<T>(request: () => Promise<{ data: T }>): Promise<T> {
+  private async requestToken(): Promise<string> {
+    const tokenUrl = this.requiredConfig('AVAILITY_TOKEN_URL');
+    const clientId = this.requiredConfig('AVAILITY_CLIENT_ID');
+    const clientSecret = this.requiredConfig('AVAILITY_CLIENT_SECRET');
+    const realm = this.configService.get<string>('AVAILITY_REALM')?.trim();
+    const scope = this.configService.get<string>('AVAILITY_SCOPE')?.trim();
+
+    const params = new URLSearchParams();
+    params.append('grant_type', 'client_credentials');
+    params.append('client_id', clientId);
+    params.append('client_secret', clientSecret);
+    if (realm) {
+      params.append('realm', realm);
+    }
+    if (scope) {
+      params.append('scope', scope);
+    }
+
+    try {
+      const response = await axios.post<TokenResponse>(tokenUrl, params, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        timeout: 30000,
+      });
+
+      const accessToken = response.data?.access_token;
+      const expiresIn = response.data?.expires_in;
+      if (!accessToken) {
+        throw new AvailityRestError('getAuthToken', new Error('Availity token response did not include an access_token'));
+      }
+      if (typeof expiresIn !== 'number' || expiresIn <= 0) {
+        throw new AvailityRestError('getAuthToken', new Error('Availity token response did not include a positive expires_in'));
+      }
+
+      this.accessToken = accessToken;
+      this.tokenExpiry = Date.now() + expiresIn * 1000;
+      this.logger.log(`Obtained Availity access token. Expires in ${expiresIn}s`);
+      return this.accessToken;
+    } catch (error) {
+      if (error instanceof AvailityRestError) {
+        throw error;
+      }
+      this.logger.error(`Failed to obtain Availity access token: ${error instanceof Error ? error.message : 'unknown'}`);
+      throw new AvailityRestError('getAuthToken', error);
+    }
+  }
+
+  private async getAuthHeaders(): Promise<Record<string, string>> {
+    const token = await this.getAuthToken();
+    return {
+      Authorization: `Bearer ${token}`,
+    };
+  }
+
+  private coverageForm(query: CoverageInquiryDto): URLSearchParams {
+    const params = new URLSearchParams();
+    params.append('payerId', query.payerId);
+    const submitterId = this.configService.get<string>('AVAILITY_SUBMITTER_ID')?.trim();
+    if (submitterId) {
+      params.append('submitterId', submitterId);
+    }
+    params.append('providerNpi', query.providerNpi);
+    params.append('memberId', query.memberId);
+    params.append('patientFirstName', query.patientFirstName);
+    params.append('patientLastName', query.patientLastName);
+    params.append('patientBirthDate', query.patientBirthDate);
+    if (query.patientGender === 'M' || query.patientGender === 'F') {
+      params.append('patientGender', query.patientGender);
+    }
+    const serviceType = query.serviceTypeCode?.trim();
+    if (!serviceType) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.BAD_REQUEST,
+          message: 'serviceTypeCode is required',
+          error: 'Bad Request',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    params.append('serviceType[]', serviceType);
+    const procedureCode = query.procedureCode?.trim();
+    if (procedureCode) {
+      params.append('procedureCode', procedureCode);
+    }
+    const serviceDate = query.serviceDate?.trim();
+    if (serviceDate) {
+      params.append('asOfDate', serviceDate);
+    }
+    return params;
+  }
+
+  private unwrapCoverage(payload: AvailityCoverageResponse): AvailityCoverageResponse {
+    const hasIdentity = payload.statusCode !== undefined || (typeof payload.id === 'string' && payload.id.trim().length > 0);
+    if (hasIdentity || !Array.isArray(payload.coverages) || payload.coverages.length === 0) {
+      return payload;
+    }
+    return payload.coverages[0];
+  }
+
+  // 0 is in progress. 4 is complete and 3 is complete with a partial payer response. 19 and the communication codes are terminal errors.
+  private async pollCoverage(created: AvailityCoverageResponse): Promise<AvailityCoverageResponse> {
+    const id = typeof created.id === 'string' ? created.id.trim() : '';
+    if (!id || !this.isInProgress(created.statusCode)) {
+      return created;
+    }
+
+    const attempts = this.coveragePollAttempts();
+    const intervalMs = this.coveragePollIntervalMs();
+    this.logger.log(`Coverage ${id} is in progress. Polling up to ${attempts} times every ${intervalMs}ms`);
+    let latest: AvailityCoverageResponse = created;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await this.sleep(intervalMs);
+      latest = await this.get<AvailityCoverageResponse>(`/availity/v1/coverages/${encodeURIComponent(id)}`);
+      if (latest.statusCode === undefined || latest.statusCode === null) {
+        throw new AvailityRestError('pollCoverage', new Error(`Coverage ${id} response did not include statusCode`));
+      }
+      if (this.isTerminalCoverage(latest.statusCode)) {
+        return latest;
+      }
+    }
+
+    throw new AvailityRestError('pollCoverage', new Error(`Coverage ${id} did not reach a terminal statusCode`));
+  }
+
+  private coveragePollAttempts(): number {
+    const configured = Number(this.configService.get('AVAILITY_COVERAGE_POLL_ATTEMPTS'));
+    if (!Number.isFinite(configured) || configured < 1) {
+      throw new AvailityRestError('pollCoverage', new Error('AVAILITY_COVERAGE_POLL_ATTEMPTS must be an integer >= 1'));
+    }
+    return configured;
+  }
+
+  private coveragePollIntervalMs(): number {
+    const configured = Number(this.configService.get('AVAILITY_COVERAGE_POLL_INTERVAL_MS'));
+    if (!Number.isFinite(configured) || configured < 0) {
+      throw new AvailityRestError('pollCoverage', new Error('AVAILITY_COVERAGE_POLL_INTERVAL_MS must be an integer >= 0'));
+    }
+    return configured;
+  }
+
+  private isInProgress(statusCode: unknown): boolean {
+    return statusCode === 0 || statusCode === '0';
+  }
+
+  private isTerminalCoverage(statusCode: unknown): boolean {
+    const code = typeof statusCode === 'number' || typeof statusCode === 'string' ? String(statusCode) : '';
+    return code === '3' || code === '4' || code === '19' || code === '7' || code === '13' || code === '14' || code === '15';
+  }
+
+  private requiredConfig(key: string): string {
+    const value = this.configService.get<string>(key)?.trim();
+    if (!value) {
+      throw new AvailityRestError('config', new Error(`${key} is required`));
+    }
+    return value;
+  }
+
+  private assignAuthorization(config: RetryableRequestConfig, token: string): void {
+    if (!config.headers) {
+      config.headers = {} as RetryableRequestConfig['headers'];
+    }
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  private isRetryableError(status: number | undefined): boolean {
+    return status !== undefined && this.retryConfig.retryableStatuses.includes(status);
+  }
+
+  private calculateBackoff(attempt: number): number {
+    const delay = this.retryConfig.baseDelayMs * Math.pow(2, attempt - 1);
+    const jitter = Math.random() * 0.3 * delay;
+    return Math.min(delay + jitter, this.retryConfig.maxDelayMs);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async execute<T>(op: string, request: () => Promise<{ data: T }>): Promise<T> {
     try {
       const response = await request();
+      if (response.data === undefined || response.data === null) {
+        throw new AvailityRestError(op, new Error('Availity response body was empty'));
+      }
       return response.data;
     } catch (error) {
-      throw this.toHttpException(error, 'Availity request failed');
+      if (error instanceof AvailityRestError) {
+        throw error;
+      }
+      throw new AvailityRestError(op, error);
     }
   }
 
@@ -365,61 +447,36 @@ export class AvailityRestService implements OnModuleInit {
       }),
     ) as Partial<T>;
   }
+}
 
-  private errorSummary(error: unknown): string {
-    if (axios.isAxiosError(error)) {
-      const data = error.response?.data;
-      if (typeof data === 'string') {
-        return data;
-      }
-      if (data && typeof data === 'object') {
-        const body = data as { error_description?: string; message?: string; error?: string };
-        return body.error_description || body.message || body.error || error.message;
-      }
-      return error.message;
-    }
-    return error instanceof Error ? error.message : 'Unknown error';
+function describeUpstream(err: unknown): { message: string; upstream: string; statusCode: number } {
+  if (err instanceof AvailityRestError) {
+    return { message: err.message, upstream: err.upstream, statusCode: err.statusCode };
   }
-
-  private toHttpException(error: unknown, fallbackMessage: string): HttpException {
-    if (error instanceof HttpException) {
-      return error;
-    }
-
-    if (axios.isAxiosError(error)) {
-      const status = error.response?.status;
-      const httpStatus = status && status >= 400 && status < 600 ? status : HttpStatus.BAD_GATEWAY;
-      const data = error.response?.data;
-      let message = fallbackMessage;
-
-      if (typeof data === 'string' && data.trim()) {
-        message = data;
-      } else if (data && typeof data === 'object') {
-        const body = data as { error_description?: string; userMessage?: string; message?: string; error?: string };
-        message = body.error_description || body.userMessage || body.message || body.error || error.message || fallbackMessage;
-      } else if (error.message) {
-        message = error.message;
-      }
-
-      return new HttpException(
-        {
-          statusCode: httpStatus,
-          message,
-          error: 'Availity request failed',
-          details: data ?? null,
-        },
-        httpStatus,
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    const statusCode = status && status >= 400 && status < 600 ? status : HttpStatus.BAD_GATEWAY;
+    const data = err.response?.data;
+    let upstream = err.message;
+    if (typeof data === 'string' && data.trim()) {
+      upstream = data;
+    } else if (data && typeof data === 'object') {
+      const body = data as { error_description?: string; userMessage?: string; message?: string; error?: string };
+      const text = [body.error_description, body.userMessage, body.message, body.error].find(
+        (part) => typeof part === 'string' && part.trim().length > 0,
       );
+      if (text) {
+        upstream = text;
+      }
     }
-
-    const message = error instanceof Error ? error.message : fallbackMessage;
-    return new HttpException(
-      {
-        statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-        message,
-        error: 'Availity request failed',
-      },
-      HttpStatus.INTERNAL_SERVER_ERROR,
-    );
+    return { message: upstream, upstream, statusCode };
   }
+  if (err instanceof Error && err.message) {
+    return { message: err.message, upstream: err.message, statusCode: HttpStatus.BAD_GATEWAY };
+  }
+  return {
+    message: 'Availity request failed',
+    upstream: 'Availity request failed',
+    statusCode: HttpStatus.BAD_GATEWAY,
+  };
 }

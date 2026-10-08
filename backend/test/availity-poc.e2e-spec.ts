@@ -14,7 +14,7 @@ import {
   sample999,
   sampleEbr,
   sampleIbr,
-} from '../src/common/mock-data.seed';
+} from './fixtures/mock-data.seed';
 import { AvailityController } from '../src/controllers/availity.controller';
 import { Acknowledgment999, EdiParserService, PipeDelimitedReport } from '../src/edi/edi-parser.service';
 import { SftpPollerCron } from '../src/sftp/sftp-poller.cron';
@@ -222,19 +222,22 @@ describe('Availity PoC workflows', () => {
     handlePost = async () => ({ data: coverageBody });
     const coverage = await controller.checkEligibility(eligibilityInquiry);
 
-    expect(mockHttp.post).toHaveBeenCalledWith(
-      '/availity/v1/coverages',
-      expect.objectContaining({
-        payerId: eligibilityInquiry.payerId,
-        memberId: eligibilityInquiry.memberId,
-        serviceType: '30',
-        patientFirstName: 'JOHN',
-        patientLastName: 'DOE',
-      }),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer poc-token-/) }),
-      }),
-    );
+    const coverageCall = mockHttp.post.mock.calls.filter((call) => call[0] === '/availity/v1/coverages').at(-1);
+    const params = coverageCall?.[1] as URLSearchParams;
+    const headers = (coverageCall?.[2] as { headers?: Record<string, string> } | undefined)?.headers;
+    expect(params).toBeInstanceOf(URLSearchParams);
+    expect(params.get('payerId')).toBe(eligibilityInquiry.payerId);
+    expect(params.get('submitterId')).toBe('AV09311993');
+    expect(params.get('providerNpi')).toBe(eligibilityInquiry.providerNpi);
+    expect(params.get('memberId')).toBe(eligibilityInquiry.memberId);
+    expect(params.get('patientFirstName')).toBe('JOHN');
+    expect(params.get('patientLastName')).toBe('DOE');
+    expect(params.get('patientBirthDate')).toBe('1985-04-12');
+    expect(params.get('patientGender')).toBe('M');
+    expect(params.get('serviceType[]')).toBe('30');
+    expect(params.get('asOfDate')).toBe('2026-09-10');
+    expect(headers?.Authorization).toMatch(/^Bearer poc-token-/);
+    expect(headers?.['Content-Type']).toBe('application/x-www-form-urlencoded');
     expect(coverage).toMatchObject({ id: 'COV-44821', status: 'Active' });
     logStep('Test 2 eligibility coverage', coverage);
   });

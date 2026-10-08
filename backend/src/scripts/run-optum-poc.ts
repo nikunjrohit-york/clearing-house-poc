@@ -3,15 +3,24 @@ import { NestFactory } from '@nestjs/core';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { AppModule } from '../app.module';
+import { claimStatusRequest, eligibilityRequest, professionalClaimRequest } from '../optum/optum.contracts';
 import { RcmWorkflowService, StepAudit } from '../optum/rcm-workflow.service';
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
 
 const steps = [
   { key: '0', name: 'OAuth token', run: (workflow: RcmWorkflowService) => workflow.authenticate() },
-  { key: '1', name: 'Eligibility 270/271', run: (workflow: RcmWorkflowService) => workflow.checkEligibility() },
-  { key: '2', name: 'Professional claim 837P', run: (workflow: RcmWorkflowService) => workflow.submitProfessionalClaim() },
-  { key: '3', name: '277CA report', run: (workflow: RcmWorkflowService) => workflow.fetch277() },
-  { key: '4', name: 'Claim status 276/277', run: (workflow: RcmWorkflowService) => workflow.queryClaimStatus() },
-  { key: '5', name: '835 remittance', run: (workflow: RcmWorkflowService) => workflow.fetch835() },
+  { key: '1', name: 'Eligibility 270/271', run: (workflow: RcmWorkflowService) => workflow.checkEligibility(eligibilityRequest(requiredEnv('OPTUM_TRADING_PARTNER_ID'))) },
+  { key: '2', name: 'Professional claim 837P', run: (workflow: RcmWorkflowService) => workflow.submitProfessionalClaim(professionalClaimRequest()) },
+  { key: '3', name: '277CA report', run: (workflow: RcmWorkflowService) => workflow.fetch277(requiredEnv('OPTUM_277_REPORT_ID')) },
+  { key: '4', name: 'Claim status 276/277', run: (workflow: RcmWorkflowService) => workflow.queryClaimStatus(claimStatusRequest('28.75')) },
+  { key: '5', name: '835 remittance', run: (workflow: RcmWorkflowService) => workflow.fetch835(requiredEnv('OPTUM_835_REPORT_ID')) },
 ];
 
 function banner(title: string) {

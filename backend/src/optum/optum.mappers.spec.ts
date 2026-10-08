@@ -11,10 +11,10 @@ import {
 
 describe('optum mappers', () => {
   it('builds the eligibility request for trading partner 87726', () => {
-    const body = eligibilityRequest();
+    const body = eligibilityRequest('87726');
     expect(body.tradingPartnerServiceId).toBe('87726');
     expect(body).toHaveProperty('encounter');
-    expect(claimStatusRequest().encounter).toMatchObject({
+    expect(claimStatusRequest('28.75').encounter).toMatchObject({
       beginningDateOfService: '20100101',
       endDateOfService: '20100102',
       submittedAmount: '28.75',
@@ -166,13 +166,13 @@ describe('optum mappers', () => {
 
   it('formats the Optum error envelope', () => {
     expect(
-      readOptumError({ error: 'invalid_request', description: 'bad member id', traceId: 'abc', meta: { applicationMode: 'sandbox' } }, 400),
+      readOptumError({ error: 'invalid_request', description: 'bad member id', traceId: 'abc', meta: { applicationMode: 'test' } }, 400),
     ).toEqual({
       httpStatus: 400,
       description: 'bad member id',
       error: 'invalid_request',
       traceId: 'abc',
-      applicationMode: 'sandbox',
+      applicationMode: 'test',
     });
   });
 });

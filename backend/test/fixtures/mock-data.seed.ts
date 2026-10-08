@@ -1,6 +1,6 @@
-import { ClaimFrequencyCode, ClaimInputDto, ClaimType, PlaceOfService } from '../edi/dto/claim-input.dto';
-import { ClaimStatusQueryDto } from '../availity-rest/dto/claim-status-query.dto';
-import { CoverageInquiryDto } from '../availity-rest/dto/coverage-inquiry.dto';
+import { ClaimStatusQueryDto } from '../../src/availity-rest/dto/claim-status-query.dto';
+import { CoverageInquiryDto } from '../../src/availity-rest/dto/coverage-inquiry.dto';
+import { ClaimFrequencyCode, ClaimInputDto, ClaimType, PlaceOfService } from '../../src/edi/dto/claim-input.dto';
 
 export const SAMPLE_BATCH_ID = 'BAT-992014';
 export const SAMPLE_FILE_CONTROL_NUMBER = 'FCN-00049281';
@@ -15,8 +15,114 @@ export const eligibilityInquiry: CoverageInquiryDto = {
   patientGender: 'M',
   serviceTypeCode: '30',
   providerNpi: '1234567893',
-  asOfDate: '2026-09-10',
+  serviceDate: '2026-09-10',
 };
+
+export interface MockCoverageBenefit {
+  type: string;
+  name: string;
+  amount?: string;
+  percent?: string;
+  coverage?: string;
+}
+
+export interface MockCoveragePlan {
+  status: string;
+  statusCode: string;
+  planName: string;
+  copay?: { amount: number };
+  deductible?: { individualRemaining: number; individualTotal: number };
+  coinsurance?: { percent: number };
+  benefits: MockCoverageBenefit[];
+}
+
+export interface MockCoverageResponse {
+  id: string;
+  statusCode: 3;
+  status: 'Complete';
+  mock: true;
+  payerId: string;
+  payerName: string;
+  memberId: string;
+  patientFirstName: string;
+  patientLastName: string;
+  patientBirthDate: string;
+  patientGender?: 'M' | 'F';
+  providerNpi: string;
+  serviceType: string;
+  procedureCode?: string;
+  serviceDate?: string;
+  plans: MockCoveragePlan[];
+}
+
+const INACTIVE_MEMBER_IDS = new Set(['MEM9999999']);
+
+export function mockCoverageResponse(query: CoverageInquiryDto): MockCoverageResponse {
+  const serviceType = query.serviceTypeCode?.trim() || '30';
+  const procedureCode = query.procedureCode?.trim();
+  const inactive = INACTIVE_MEMBER_IDS.has(query.memberId.trim().toUpperCase());
+  const shared = {
+    statusCode: 3 as const,
+    status: 'Complete' as const,
+    mock: true as const,
+    payerId: query.payerId,
+    payerName: 'Availity Sandbox Payer',
+    memberId: query.memberId,
+    patientFirstName: query.patientFirstName,
+    patientLastName: query.patientLastName,
+    patientBirthDate: query.patientBirthDate,
+    ...(query.patientGender ? { patientGender: query.patientGender } : {}),
+    providerNpi: query.providerNpi,
+    serviceType,
+    ...(procedureCode ? { procedureCode } : {}),
+    ...(query.serviceDate ? { serviceDate: query.serviceDate } : {}),
+  };
+
+  if (inactive) {
+    return {
+      ...shared,
+      id: 'MOCK-COV-INACTIVE',
+      plans: [
+        {
+          status: 'Inactive',
+          statusCode: '6',
+          planName: 'Policy not in force',
+          benefits: [{ type: 'Coverage', name: 'Eligibility', coverage: 'Inactive' }],
+        },
+      ],
+    };
+  }
+
+  const benefits: MockCoverageBenefit[] = [
+    { type: 'Copay', name: 'Office visit copay', amount: '30.00' },
+    { type: 'Deductible', name: 'Individual deductible remaining', amount: '450.00' },
+    { type: 'Coinsurance', name: 'Coinsurance', percent: '20' },
+  ];
+  if (procedureCode) {
+    benefits.push({
+      type: 'Procedure',
+      name: procedureCode,
+      coverage: 'Covered',
+      amount: procedureCode === '99213' ? '150.00' : '0.00',
+    });
+  }
+
+  return {
+    ...shared,
+    id: procedureCode ? `MOCK-COV-${procedureCode}` : 'MOCK-COV-ACTIVE',
+    plans: [
+      {
+        status: 'Active',
+        statusCode: '1',
+        planName: procedureCode ? `Professional visit ${procedureCode}` : 'Aetna Choice POS II',
+        copay: { amount: 30 },
+        deductible: { individualRemaining: 450, individualTotal: 1500 },
+        coinsurance: { percent: 20 },
+        benefits,
+      },
+    ],
+  };
+}
 
 export const claimStatusQuery: ClaimStatusQueryDto = {
   payerId: '00001',

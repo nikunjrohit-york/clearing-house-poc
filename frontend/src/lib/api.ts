@@ -1,15 +1,40 @@
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    readonly status = 0,
-    readonly body: unknown = null,
-  ) {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(message: string, options?: { cause?: unknown; status?: number; body?: unknown }) {
     super(message);
     this.name = 'ApiError';
+    this.status = options?.status ?? 0;
+    this.body = options?.body ?? null;
+    if (options && 'cause' in options) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
   }
 }
 
+export interface CoverageInquiryPayload {
+  payerId: string;
+  memberId: string;
+  patientFirstName: string;
+  patientLastName: string;
+  patientBirthDate: string;
+  patientGender?: 'M' | 'F';
+  providerNpi: string;
+  serviceTypeCode?: string;
+  procedureCode?: string;
+  serviceDate?: string;
+}
+
+export function postCoverageInquiry(payload: CoverageInquiryPayload): Promise<unknown> {
+  return api<unknown>('/api/availity/eligibility', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || 'GET').toUpperCase();
   let response: Response;
   try {
     response = await fetch(path, {
@@ -20,24 +45,36 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
         ...init?.headers,
       },
     });
-  } catch {
-    throw new ApiError('Cannot reach the API. Start the Nest server on port 5000.');
+  } catch (err) {
+    throw new ApiError(`${method} ${path} failed`, { cause: err, status: 0 });
   }
 
   const text = await response.text();
-  let data: { message?: string | string[] } | null = null;
+  let data: unknown;
   if (text) {
     try {
-      data = JSON.parse(text) as { message?: string | string[] };
-    } catch {
-      data = { message: text };
+      data = JSON.parse(text) as unknown;
+    } catch (err) {
+      throw new ApiError(`${method} ${path} failed`, { cause: err, status: response.status, body: text });
     }
   }
 
   if (!response.ok) {
-    const message = data?.message;
-    const rendered = Array.isArray(message) ? message.join('\n') : message || `Request failed (${response.status})`;
-    throw new ApiError(rendered, response.status, data);
+    const record = data && typeof data === 'object' ? (data as { error?: unknown; message?: unknown }) : undefined;
+    const fromError = typeof record?.error === 'string' ? record.error : '';
+    const fromMessage = Array.isArray(record?.message)
+      ? record.message.join('\n')
+      : typeof record?.message === 'string'
+        ? record.message
+        : '';
+    throw new ApiError(fromError || fromMessage || `${method} ${path} failed`, {
+      status: response.status,
+      body: data,
+    });
+  }
+
+  if (data === undefined) {
+    throw new ApiError(`${method} ${path} failed`, { status: response.status, body: text });
   }
 
   return data as T;

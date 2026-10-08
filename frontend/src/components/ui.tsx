@@ -9,12 +9,16 @@ export function Spinner({ label }: { label: string }) {
   );
 }
 
-export function ErrorAlert({ message }: { message: string }) {
+export function ErrorPanel({ message }: { message: string }) {
   return (
     <div className="whitespace-pre-wrap rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
       {message}
     </div>
   );
+}
+
+export function ErrorAlert({ message }: { message: string }) {
+  return <ErrorPanel message={message} />;
 }
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {

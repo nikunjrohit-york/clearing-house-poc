@@ -1,11 +1,15 @@
 import 'reflect-metadata';
 import { Logger, ValidationPipe } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
+import { validateAvailityConfigOrThrow } from './config/availity-env';
 
 async function bootstrap() {
   const logger = new Logger('AvailityEngine');
+  validateAvailityConfigOrThrow(process.env);
+
+  const { NestFactory } = await import('@nestjs/core');
+  const { ConfigService } = await import('@nestjs/config');
+  const { AppModule } = await import('./app.module');
+  const { AvailityExceptionFilter } = await import('./common/availity-exception.filter');
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
 
@@ -21,8 +25,14 @@ async function bootstrap() {
       forbidNonWhitelisted: false,
     }),
   );
+  app.useGlobalFilters(new AvailityExceptionFilter());
 
-  const port = configService.get<number>('PORT') ?? 3000;
+  validateAvailityConfigOrThrow(process.env);
+
+  const port = configService.get<number>('PORT');
+  if (!port) {
+    throw new Error('PORT is required');
+  }
   await app.listen(port);
 
   logger.log(`Availity API listening on http://localhost:${port}`);
@@ -30,4 +40,8 @@ async function bootstrap() {
   logger.log(`SFTP gateway: ${configService.get<string>('AVAILITY_SFTP_HOST')}:${configService.get<string>('AVAILITY_SFTP_PORT')}`);
 }
 
-bootstrap();
+bootstrap().catch((error: unknown) => {
+  const message = error instanceof Error ? error.stack || error.message : String(error);
+  console.error(message);
+  process.exit(1);
+});

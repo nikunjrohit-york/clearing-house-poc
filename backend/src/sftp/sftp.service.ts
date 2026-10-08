@@ -1,4 +1,4 @@
-import { BadRequestException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -28,6 +28,27 @@ export interface InboundFile {
   byteSize: number;
   modifiedAt: string;
   content: string;
+}
+
+export interface RemoteFileEntry {
+  fileName: string;
+  byteSize: number;
+  modifiedAt: string;
+  type: string;
+}
+
+export class SftpOperationError extends Error {
+  readonly op: string;
+  readonly upstream: string;
+  readonly statusCode = 502;
+
+  constructor(op: string, err: unknown) {
+    const upstream = err instanceof Error && err.message ? err.message : 'SFTP operation failed';
+    super(upstream);
+    this.name = 'SftpOperationError';
+    this.op = op;
+    this.upstream = upstream;
+  }
 }
 
 @Injectable()
@@ -66,7 +87,7 @@ export class SftpService {
         status: 'UPLOADED',
       };
     } catch (error) {
-      throw this.toHttpException(error, `SFTP upload failed for ${safeName}`);
+      this.rethrow('uploadBatchFile', error);
     } finally {
       await this.close(sftp);
     }
@@ -85,7 +106,7 @@ export class SftpService {
           status: 'FAILED',
           fileName: safeName,
           notificationFile: failed.name,
-          errorDetails: this.parseFailureReason(this.readDownloaded(downloaded)),
+          errorDetails: this.parseFailureReason(this.readDownloaded(downloaded, `${sendDir}/${failed.name}`)),
         };
       }
 
@@ -103,21 +124,21 @@ export class SftpService {
         fileName: safeName,
       };
     } catch (error) {
-      throw this.toHttpException(error, `SFTP notification check failed for ${safeName}`);
+      this.rethrow('checkUploadNotification', error);
     } finally {
       await this.close(sftp);
     }
   }
 
   private async connect(): Promise<SftpClient> {
-    const host = this.configService.get<string>('AVAILITY_SFTP_HOST') || 'qa-files.availity.com';
-    const port = Number(this.configService.get<number | string>('AVAILITY_SFTP_PORT') || 22);
-    const username = this.configService.get<string>('AVAILITY_SFTP_USERNAME') || '';
-    const password = this.configService.get<string>('AVAILITY_SFTP_PASSWORD') || '';
-    const privateKeyPath = this.configService.get<string>('AVAILITY_SFTP_PRIVATE_KEY_PATH') || '';
+    const host = this.requiredSetting('AVAILITY_SFTP_HOST');
+    const port = Number(this.configService.get<number | string>('AVAILITY_SFTP_PORT'));
+    const username = this.requiredSetting('AVAILITY_SFTP_USERNAME');
+    const password = this.configService.get<string>('AVAILITY_SFTP_PASSWORD')?.trim() ?? '';
+    const privateKeyPath = this.configService.get<string>('AVAILITY_SFTP_PRIVATE_KEY_PATH')?.trim() ?? '';
 
-    if (!username) {
-      throw new BadRequestException('AVAILITY_SFTP_USERNAME is required');
+    if (!Number.isInteger(port) || port <= 0) {
+      throw new SftpOperationError('connect', new Error('AVAILITY_SFTP_PORT is required'));
     }
 
     if (privateKeyPath && password) {
@@ -153,7 +174,7 @@ export class SftpService {
       return sftp;
     } catch (error) {
       await this.close(sftp);
-      throw this.toHttpException(error, `Unable to connect to Availity SFTP ${host}:${port}`);
+      this.rethrow('connect', error);
     }
   }
 
@@ -172,8 +193,7 @@ export class SftpService {
     try {
       const directory = await sftp.exists(receiveDir);
       if (!directory) {
-        this.logger.warn(`Receive directory ${receiveDir} does not exist`);
-        return [];
+        throw new SftpOperationError('downloadReceiveFiles', new Error(`Receive directory ${receiveDir} does not exist`));
       }
 
       const entries = await sftp.list(receiveDir);
@@ -182,22 +202,42 @@ export class SftpService {
         if (entry.type !== '-') {
           continue;
         }
-        try {
-          const payload = await sftp.get(`${receiveDir}/${entry.name}`);
-          downloaded.push({
-            fileName: entry.name,
-            byteSize: entry.size,
-            modifiedAt: new Date(entry.modifyTime).toISOString(),
-            content: this.readDownloaded(payload),
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown download error';
-          this.logger.error(`Failed to download ${receiveDir}/${entry.name}: ${message}`);
-        }
+        const payload = await sftp.get(`${receiveDir}/${entry.name}`);
+        downloaded.push({
+          fileName: entry.name,
+          byteSize: entry.size,
+          modifiedAt: new Date(entry.modifyTime).toISOString(),
+          content: this.readDownloaded(payload, `${receiveDir}/${entry.name}`),
+        });
       }
       return downloaded;
     } catch (error) {
-      throw this.toHttpException(error, `SFTP download failed for ${receiveDir}`);
+      this.rethrow('downloadReceiveFiles', error);
+    } finally {
+      await this.close(sftp);
+    }
+  }
+
+  async listSendFiles(): Promise<RemoteFileEntry[]> {
+    return this.listDirectory(this.sendDirectory(), 'listSendFiles');
+  }
+
+  async listReceiveFiles(): Promise<RemoteFileEntry[]> {
+    return this.listDirectory(this.receiveDirectory(), 'listReceiveFiles');
+  }
+
+  private async listDirectory(dir: string, op: string): Promise<RemoteFileEntry[]> {
+    const sftp = await this.connect();
+    try {
+      const entries = await sftp.list(dir);
+      return entries.map((entry) => ({
+        fileName: entry.name,
+        byteSize: entry.size,
+        modifiedAt: new Date(entry.modifyTime).toISOString(),
+        type: entry.type,
+      }));
+    } catch (error) {
+      this.rethrow(op, error);
     } finally {
       await this.close(sftp);
     }
@@ -267,14 +307,29 @@ export class SftpService {
     );
   }
 
-  private readDownloaded(payload: string | Buffer | NodeJS.WritableStream): string {
+  private readDownloaded(payload: string | Buffer | NodeJS.WritableStream, remotePath: string): string {
     if (Buffer.isBuffer(payload)) {
       return payload.toString('utf8');
     }
     if (typeof payload === 'string') {
       return payload;
     }
-    return '';
+    throw new SftpOperationError('download', new Error(`SFTP get for ${remotePath} did not return file bytes`));
+  }
+
+  private requiredSetting(key: string): string {
+    const value = this.configService.get<string>(key)?.trim();
+    if (!value) {
+      throw new SftpOperationError('connect', new Error(`${key} is required`));
+    }
+    return value;
+  }
+
+  private rethrow(op: string, error: unknown): never {
+    if (error instanceof BadRequestException || error instanceof SftpOperationError) {
+      throw error;
+    }
+    throw new SftpOperationError(op, error);
   }
 
   private parseFailureReason(raw: string): string {
@@ -296,21 +351,5 @@ export class SftpService {
       .map((entry) => entry.trim())
       .find((entry) => entry.length > 0);
     return (line || text).slice(0, 2000);
-  }
-
-  private toHttpException(error: unknown, fallback: string): HttpException {
-    if (error instanceof HttpException) {
-      return error;
-    }
-    const message = error instanceof Error ? error.message : fallback;
-    this.logger.error(message);
-    return new HttpException(
-      {
-        statusCode: HttpStatus.BAD_GATEWAY,
-        message: message || fallback,
-        error: 'SFTP error',
-      },
-      HttpStatus.BAD_GATEWAY,
-    );
   }
 }

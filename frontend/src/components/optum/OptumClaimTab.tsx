@@ -334,8 +334,12 @@ export default function OptumClaimTab({ onSubmitted }: { onSubmitted: (claim: Su
 
 function ClaimReceipt({ mode, audit }: { mode: 'validate' | 'submit'; audit: StepAudit<ClaimResult> }) {
   const parsed = audit.parsed;
-  const raw = (audit.calls.at(-1)?.data ?? {}) as { claimReference?: Record<string, string>; editStatus?: string };
-  const reference = raw.claimReference ?? {};
+  const callData = audit.calls.at(-1)?.data;
+  const raw = (callData && typeof callData === 'object' ? callData : {}) as {
+    claimReference?: Record<string, string>;
+    editStatus?: string;
+  };
+  const reference = raw.claimReference && typeof raw.claimReference === 'object' ? raw.claimReference : {};
   const ok = /success/i.test(parsed?.submissionStatus ?? '');
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">

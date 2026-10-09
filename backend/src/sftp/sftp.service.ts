@@ -59,7 +59,9 @@ export class SftpService {
 
   async uploadBatchFile(fileName: string, content: string | Buffer): Promise<BatchUploadResult> {
     const safeName = this.safeFileName(fileName);
-    const payload = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+    const text = Buffer.isBuffer(content) ? content.toString('utf8') : content;
+    this.assertIsaFixedFields(text);
+    const payload = Buffer.from(text, 'utf8');
     if (payload.length === 0) {
       throw new BadRequestException('Cannot upload an empty batch file');
     }
@@ -315,6 +317,28 @@ export class SftpService {
       return payload;
     }
     throw new SftpOperationError('download', new Error(`SFTP get for ${remotePath} did not return file bytes`));
+  }
+
+  private assertIsaFixedFields(content: string): void {
+    if (!content.startsWith('ISA')) {
+      return;
+    }
+    if (content.includes('\r') || content.includes('\n')) {
+      throw new BadRequestException('X12 batch must not contain line breaks; they shift ISA fixed fields');
+    }
+    const isa = content.split('~', 1)[0] ?? '';
+    const elements = isa.split('*');
+    if (elements.length < 9 || elements[0] !== 'ISA') {
+      return;
+    }
+    if (elements[5] !== 'ZZ') {
+      throw new BadRequestException('ISA05 Interchange ID Qualifier must be ZZ');
+    }
+    if (elements[6].length !== 15) {
+      throw new BadRequestException(
+        `ISA06 Interchange Sender ID must be 15 characters before upload, received ${elements[6].length}`,
+      );
+    }
   }
 
   private requiredSetting(key: string): string {

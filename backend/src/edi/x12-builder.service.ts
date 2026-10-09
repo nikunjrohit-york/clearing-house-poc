@@ -101,6 +101,20 @@ export class X12BuilderService {
     return this.requiredConfig('AVAILITY_SUBMITTER_ID');
   }
 
+  /** Loop 2010BB NM109. Blank or the rejected placeholder 00001 uses AVAILITY_PAYER_ID. GS03 stays the Availity receiver id. */
+  professionalPayerId(requested?: string): string {
+    const configured = this.configService.get<string>('AVAILITY_PAYER_ID')?.trim() || 'AVAILITY';
+    const submitted = requested?.trim() ?? '';
+    if (!submitted || submitted === '00001') {
+      return configured;
+    }
+    return submitted;
+  }
+
+  usesQaPayerList(): boolean {
+    return this.usageIndicator() === 'T' && process.env.NODE_ENV !== 'test';
+  }
+
   private receiverId(): string {
     return this.requiredConfig('AVAILITY_RECEIVER_ID');
   }
@@ -134,6 +148,22 @@ export class X12BuilderService {
 
   private pad(value: string, length: number): string {
     return value.padEnd(length, ' ').slice(0, length);
+  }
+
+  // ISA02/04/06/08 are fixed-width. Trim configured ids, then right-pad. Never trim the padded result.
+  private fixedField(value: string | undefined | null, length: number, label: string, allowBlank = false): string {
+    const trimmed = allowBlank ? (value ?? '') : (value?.trim() ?? '');
+    if (!allowBlank && !trimmed) {
+      throw new BadRequestException(`${label} is required`);
+    }
+    if (trimmed.length > length) {
+      throw new BadRequestException(`${label} is ${trimmed.length} characters; the fixed field allows ${length}`);
+    }
+    const padded = trimmed.padEnd(length, ' ');
+    if (padded.length !== length || (!allowBlank && padded.trimEnd() !== trimmed)) {
+      throw new BadRequestException(`${label} must be right-padded with spaces to ${length} characters`);
+    }
+    return padded;
   }
 
   private formatDate8(value: string | Date): string {
@@ -200,6 +230,8 @@ export class X12BuilderService {
     if (host === 'files.availity.com' && usage === 'T') {
       throw new BadRequestException('ISA15=T cannot be sent to files.availity.com without AVAILITY_ALLOW_ENV_MISMATCH=true');
     }
+    this.fixedField(this.configService.get<string>('AVAILITY_SUBMITTER_ID'), 15, 'ISA06');
+    this.fixedField(this.configService.get<string>('AVAILITY_RECEIVER_ID'), 15, 'ISA08');
   }
 
   // Companion Guide §3.7. Field names are included so the API can show which edit failed.
@@ -298,15 +330,19 @@ export class X12BuilderService {
   }
 
   private buildIsa(icn: string, now: Date): string {
+    const senderQualifier = 'ZZ';
+    const senderId = this.fixedField(this.configService.get<string>('AVAILITY_SUBMITTER_ID'), 15, 'ISA06');
+    const receiverQualifier = '01';
+    const receiverId = this.fixedField(this.configService.get<string>('AVAILITY_RECEIVER_ID'), 15, 'ISA08');
     const elements = [
       '00',
-      '          ',
+      this.fixedField(' '.repeat(10), 10, 'ISA02', true),
       '00',
-      '          ',
-      'ZZ',
-      this.pad(this.submitterId(), 15),
-      '01',
-      this.pad(this.receiverId(), 15),
+      this.fixedField(' '.repeat(10), 10, 'ISA04', true),
+      senderQualifier,
+      senderId,
+      receiverQualifier,
+      receiverId,
       this.formatUtcDate6(now),
       this.formatUtcTime4(now),
       '^',
@@ -316,7 +352,44 @@ export class X12BuilderService {
       this.usageIndicator(),
       ':',
     ];
-    return `ISA*${elements.join('*')}`;
+    const isa = `ISA*${elements.join('*')}`;
+    this.assertIsaSegment(isa, senderQualifier, senderId, receiverQualifier, receiverId);
+    return isa;
+  }
+
+  private assertIsaSegment(
+    isa: string,
+    senderQualifier: string,
+    senderId: string,
+    receiverQualifier: string,
+    receiverId: string,
+  ): void {
+    if (isa.includes('\r') || isa.includes('\n')) {
+      throw new BadRequestException('ISA segment must not contain line breaks');
+    }
+    // 105 characters plus the '~' terminator is the 106-character ISA record.
+    if (isa.length !== 105) {
+      throw new BadRequestException(`ISA segment must be 105 characters before the terminator, received ${isa.length}`);
+    }
+    const elements = isa.split('*');
+    if (elements.length !== 17 || elements[0] !== 'ISA') {
+      throw new BadRequestException('ISA element delimiter shifted the fixed fields');
+    }
+    if (elements[2].length !== 10 || elements[4].length !== 10) {
+      throw new BadRequestException('ISA02 and ISA04 must be 10 characters');
+    }
+    if (elements[5] !== senderQualifier) {
+      throw new BadRequestException('ISA05 Interchange ID Qualifier must be ZZ');
+    }
+    if (elements[6].length !== 15 || elements[6] !== senderId) {
+      throw new BadRequestException(`ISA06 Interchange Sender ID must be 15 characters, received ${elements[6].length}`);
+    }
+    if (elements[7] !== receiverQualifier) {
+      throw new BadRequestException('ISA07 Interchange ID Qualifier must be 01');
+    }
+    if (elements[8].length !== 15 || elements[8] !== receiverId) {
+      throw new BadRequestException(`ISA08 Interchange Receiver ID must be 15 characters, received ${elements[8].length}`);
+    }
   }
 
   private buildGs(functionalId: string, version: string, groupControlNumber: string, now: Date): string {
@@ -351,7 +424,11 @@ export class X12BuilderService {
       this.seg('GE', ['1', groupControlNumber]),
       this.seg('IEA', ['1', interchangeControlNumber]),
     ];
-    return `${segments.join('~')}~`;
+    const edi = `${segments.join('~')}~`;
+    if (/[\r\n]/.test(edi)) {
+      throw new BadRequestException('X12 interchange must not contain line breaks');
+    }
+    return edi;
   }
 
   private assertProfessionalClaim(dto: ClaimInputDto): ClaimInputDto {
@@ -499,7 +576,7 @@ export class X12BuilderService {
     claim.serviceLines.forEach((line, index) => body.push(...this.serviceLineLoops(line, index)));
 
     const edi = this.wrapTransaction('HC', PROFESSIONAL_VERSION, '837', body);
-    this.logger.log(`Built 837P claim ${claim.claimControlNumber} for payer ${claim.tradingPartnerId}`);
+    this.logger.log(`Built 837P claim ${claim.claimControlNumber} for payer ${this.professionalPayerId(claim.tradingPartnerId)}`);
     return edi;
   }
 
@@ -548,7 +625,9 @@ export class X12BuilderService {
     segments.push(
       this.seg('DMG', ['D8', this.formatDate8(subscriber.birthDate), this.text(subscriber.gender).toUpperCase()]),
     );
-    segments.push(this.seg('NM1', ['PR', '2', 'PAYER', '', '', '', '', 'PI', this.text(claim.tradingPartnerId)]));
+    segments.push(
+      this.seg('NM1', ['PR', '2', 'PAYER', '', '', '', '', 'PI', this.professionalPayerId(claim.tradingPartnerId)]),
+    );
     if (claim.dependent) {
       segments.push(...this.dependentLoops(claim.dependent));
     }

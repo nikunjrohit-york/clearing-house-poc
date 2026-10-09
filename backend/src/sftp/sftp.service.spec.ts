@@ -62,6 +62,18 @@ describe('SftpService', () => {
     expect(mockSftp.end).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses an ISA06 sender id that is not 15 characters and keeps a padded id intact', async () => {
+    const shortIsa = `ISA*00*${' '.repeat(10)}*00*${' '.repeat(10)}*ZZ*3109808*01*${'030240928'.padEnd(15, ' ')}*251009*1200*^*00501*000000001*1*T*:~`;
+    await expect(service().uploadBatchFile('BATCH_000000001.txt', shortIsa)).rejects.toBeInstanceOf(BadRequestException);
+    expect(mockSftp.put).not.toHaveBeenCalled();
+
+    const padded = `ISA*00*${' '.repeat(10)}*00*${' '.repeat(10)}*ZZ*${'3109808'.padEnd(15, ' ')}*01*${'030240928'.padEnd(15, ' ')}*251009*1200*^*00501*000000001*1*T*:~`;
+    await service().uploadBatchFile('BATCH_000000001.txt', padded);
+    const uploaded = mockSftp.put.mock.calls[0][0] as Buffer;
+    expect(uploaded.toString('utf8').split('*')[6]).toBe('3109808        ');
+    expect(uploaded.toString('utf8').split('*')[6]).toHaveLength(15);
+  });
+
   it('closes the connection when the upload fails', async () => {
     mockSftp.put.mockRejectedValue(new Error('disk full'));
 

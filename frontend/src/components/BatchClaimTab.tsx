@@ -94,7 +94,7 @@ const emptyForm: BatchForm = {
 };
 
 const officeVisit: BatchForm = {
-  payerId: '00001',
+  payerId: 'AVAILITY',
   claimControlNumber: 'CLM123456',
   frequencyCode: '1',
   diagnosisCode: 'I10',

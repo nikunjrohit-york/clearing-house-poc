@@ -187,7 +187,7 @@ No Availity tab calls these two routes today. The builders for a batch 276 file 
 | File drop | SFTP `/SendFiles` | The 837P submission. Availity writes a success or failure notification back into this folder |
 | File pickup | SFTP `/ReceiveFiles` | ACK, TA1, 999, IBR/IBRP, EBR, DPR, and ERA/835 after enrollment |
 
-Payer List (`GET /v1/availity-payer-list`) and Configurations (`GET /v1/configurations`) are part of Availity’s HIPAA product family and are not called by this service. Patient Cost Estimator (`/availity/v1/professional-claims`) is a predetermination product. This design does not use it as claim submission.
+On QA, batch validate and submit call `GET /availity/v1/availity-payer-list?payerId=<id>&transactionType=837P` before building the 837P. The sandbox payer `AVAILITY` skips that lookup. `00001` and `61001` are not Availity 837P payers. The QA default is `AVAILITY`. Other test ids are `00020` (Aetna), `00180` (Humana), `00300` (Cigna), and `14303` (American Family). Configurations (`GET /v1/configurations`) are not called. Patient Cost Estimator (`/availity/v1/professional-claims`) is a predetermination product. This design does not use it as claim submission.
 
 ### 1.5 Working 837P batch payload
 
@@ -198,7 +198,7 @@ The body below is the shape that produced a successful QA upload. `tradingPartne
 ```json
 {
   "claimType": "professional",
-  "tradingPartnerId": "00001",
+  "tradingPartnerId": "AVAILITY",
   "claimControlNumber": "CLM123456",
   "frequencyCode": "1",
   "placeOfService": "11",

@@ -50,6 +50,7 @@ export class AvailityController {
   @HttpCode(HttpStatus.OK)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async validateClaim(@Body() claim: ClaimInputDto) {
+    await this.applyProfessionalPayer(claim);
     const x12Payload = this.x12Builder.build837Claim(claim);
     const edits = await this.restService.validateClaimX12(x12Payload, claim.billingProvider.taxId, claim.tradingPartnerId);
     return {
@@ -64,6 +65,7 @@ export class AvailityController {
   @HttpCode(HttpStatus.ACCEPTED)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async submitBatchClaim(@Body() claim: ClaimInputDto) {
+    await this.applyProfessionalPayer(claim);
     const edi = this.x12Builder.build837Claim(claim);
     const interchangeControlNumber = this.interchangeControlNumber(edi);
     const fileName = `BATCH_${interchangeControlNumber}.txt`;
@@ -93,6 +95,15 @@ export class AvailityController {
     const polled = await this.poller.pollReceiveFiles();
     const reports = this.poller.getReports();
     return { polled: polled.length, count: reports.length, reports };
+  }
+
+  private async applyProfessionalPayer(claim: ClaimInputDto): Promise<void> {
+    const payerId = this.x12Builder.professionalPayerId(claim.tradingPartnerId);
+    claim.tradingPartnerId = payerId;
+    // AVAILITY is the QA sandbox payer and is not returned by the payer-list search.
+    if (payerId.toUpperCase() !== 'AVAILITY' && this.x12Builder.usesQaPayerList()) {
+      await this.restService.assertProfessionalPayer(payerId);
+    }
   }
 
   private interchangeControlNumber(edi: string): string {

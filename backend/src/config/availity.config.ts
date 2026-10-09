@@ -39,6 +39,7 @@ function requiredOutsideTest(name: string) {
         AVAILITY_SUBMITTER_ID: requiredOutsideTest('AVAILITY_SUBMITTER_ID'),
         AVAILITY_RECEIVER_ID: requiredOutsideTest('AVAILITY_RECEIVER_ID'),
         AVAILITY_USAGE_INDICATOR: Joi.string().valid('T', 'P').default('T'),
+        AVAILITY_PAYER_ID: Joi.string().trim().default('AVAILITY'),
         AVAILITY_SFTP_HOST: Joi.string().when('NODE_ENV', {
           is: 'test',
           then: Joi.string().allow('').optional(),

@@ -255,6 +255,29 @@ export class AvailityRestService implements OnModuleInit {
     return this.get(`/v1/claim-statuses/${encodeURIComponent(trimmed)}`);
   }
 
+  async assertProfessionalPayer(payerId: string): Promise<void> {
+    const requested = payerId?.trim();
+    if (!requested) {
+      throw new HttpException(
+        { statusCode: HttpStatus.BAD_REQUEST, message: 'payerId is required', error: 'Bad Request' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const body = await this.get<unknown>('/availity/v1/availity-payer-list', {
+      params: { payerId: requested, transactionType: '837P' },
+    });
+    if (!payerListIncludes(body, requested)) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.BAD_REQUEST,
+          message: `Payer ID ${requested} is not valid for 837P on the Availity payer list`,
+          error: 'Bad Request',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+  }
+
   async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const headers = await this.getAuthHeaders();
     return this.execute(`GET ${url}`, () => this.httpClient.get<T>(url, { ...config, headers }));
@@ -501,6 +524,36 @@ export class AvailityRestService implements OnModuleInit {
       }),
     ) as Partial<T>;
   }
+}
+
+export function payerListIncludes(body: unknown, payerId: string): boolean {
+  const wanted = payerId.trim().toUpperCase();
+  if (!wanted) {
+    return false;
+  }
+  const found = new Set<string>();
+  collectPayerIds(body, found);
+  return found.has(wanted);
+}
+
+function collectPayerIds(value: unknown, found: Set<string>): void {
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectPayerIds(entry, found));
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  const payerId = record.payerId;
+  if (typeof payerId === 'string' && payerId.trim()) {
+    found.add(payerId.trim().toUpperCase());
+  }
+  Object.values(record).forEach((entry) => {
+    if (entry && typeof entry === 'object') {
+      collectPayerIds(entry, found);
+    }
+  });
 }
 
 function describeUpstream(err: unknown): { message: string; upstream: string; statusCode: number } {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { HttpException, HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } from 'axios';
@@ -44,6 +45,19 @@ export class AvailityRestError extends Error {
     this.upstream = described.upstream;
     this.statusCode = described.statusCode;
   }
+}
+
+export interface ClaimEditResult {
+  severity?: string;
+  ruleCode?: string;
+  description?: string;
+  message?: string;
+  lineNumber?: number | string;
+}
+
+export interface ClaimValidationResponse {
+  triggeredResult: ClaimEditResult[];
+  transactionIdentifier?: string;
 }
 
 export interface AvailityCoverageResponse {
@@ -166,6 +180,46 @@ export class AvailityRestService implements OnModuleInit {
       }
       throw new AvailityRestError('checkEligibility', error);
     }
+  }
+
+  async validateClaimX12(
+    x12Payload: string,
+    customerIdentifier?: string,
+    payerIdentifier?: string,
+  ): Promise<ClaimValidationResponse> {
+    const payload = x12Payload.trim();
+    if (!payload) {
+      throw new HttpException(
+        { statusCode: HttpStatus.BAD_REQUEST, message: 'X12 payload is required', error: 'Bad Request' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const customer = customerIdentifier?.trim() || this.configService.get<string>('AVAILITY_SUBMITTER_ID')?.trim();
+    if (!customer) {
+      throw new AvailityRestError('validateClaimX12', new Error('customerIdentifier or AVAILITY_SUBMITTER_ID is required'));
+    }
+    const payer = payerIdentifier?.trim();
+    if (!payer) {
+      throw new HttpException(
+        { statusCode: HttpStatus.BAD_REQUEST, message: 'payerIdentifier is required', error: 'Bad Request' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const result = await this.post<ClaimValidationResponse>('/api/v1/payment-accuracy/x12/edits', {
+      payload,
+      traceIdentifier: randomUUID(),
+      customerIdentifier: customer,
+      payerIdentifier: payer,
+      lineOfBusiness: 'COM',
+    });
+    if (!Array.isArray(result.triggeredResult)) {
+      throw new AvailityRestError(
+        'validateClaimX12',
+        new Error('Availity claim validation response did not include triggeredResult'),
+      );
+    }
+    return result;
   }
 
   async submitClaimStatus(query: ClaimStatusQueryDto): Promise<unknown> {

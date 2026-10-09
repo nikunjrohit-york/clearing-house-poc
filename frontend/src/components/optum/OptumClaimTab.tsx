@@ -1,7 +1,7 @@
 import { FormEvent, useMemo, useState } from 'react';
 import { StepAudit, blankForm, controlNumber, optumErrorText, optumPost, ymd } from '../../lib/optum';
 import { SubmittedClaim } from '../../lib/optum-claim';
-import { Badge, ErrorAlert, Field, RawJson, SampleButtons, Spinner, Stat, inputClass } from '../ui';
+import { Badge, ErrorAlert, Field, FillSelect, RawJson, Spinner, Stat, inputClass } from '../ui';
 
 interface ClaimWarning {
   field: string;
@@ -195,7 +195,11 @@ export default function OptumClaimTab({ onSubmitted }: { onSubmitted: (claim: Su
             acknowledgements arrive later as 277CA reports.
           </p>
         </div>
-        <SampleButtons onSample={() => setForm(sampleForm)} onClear={() => setForm(emptyForm)} />
+        <FillSelect
+          options={[{ id: 'johnone', label: 'johnone doeOne — professional claim (payer 9496)', value: sampleForm }]}
+          onFill={setForm}
+          onClear={() => setForm(emptyForm)}
+        />
 
         <div className="grid gap-4 md:grid-cols-3">
           {text('tradingPartnerServiceId', 'Trading partner (payer) ID', { required: true })}

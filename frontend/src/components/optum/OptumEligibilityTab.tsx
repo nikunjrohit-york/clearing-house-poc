@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { StepAudit, blankForm, controlNumber, optumErrorText, optumPost, ymd } from '../../lib/optum';
-import { Badge, ErrorAlert, Field, RawJson, SampleButtons, Spinner, Stat, inputClass } from '../ui';
+import { Badge, ErrorAlert, Field, FillSelect, RawJson, Spinner, Stat, inputClass } from '../ui';
 
 interface Benefit {
   name: string;
@@ -89,7 +89,11 @@ export default function OptumEligibilityTab() {
           <h2 className="text-lg font-semibold text-slate-900">Real-time eligibility (270/271)</h2>
           <p className="mt-1 text-sm text-slate-500">POST /medicalnetwork/eligibility/v3. Optum answers in real time with the payer's 271.</p>
         </div>
-        <SampleButtons onSample={() => setForm(sampleForm)} onClear={() => setForm(emptyForm)} />
+        <FillSelect
+          options={[{ id: 'johnone', label: 'johnOne doeOne — payer 87726', value: sampleForm }]}
+          onFill={setForm}
+          onClear={() => setForm(emptyForm)}
+        />
         <Field label="Trading partner (payer) ID">
           <input className={inputClass} required value={form.tradingPartnerServiceId} onChange={(event) => update('tradingPartnerServiceId', event.target.value)} />
         </Field>

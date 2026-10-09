@@ -12,8 +12,9 @@ import {
   ServiceType,
 } from './dto/eligibility-query.dto';
 import {
+  BillingProvider,
+  ClaimAddress,
   ClaimInputDto,
-  ClaimProvider,
   ClaimSubscriber,
   ClaimDependent,
   ClaimServiceLine,
@@ -219,7 +220,7 @@ export class X12BuilderService {
     }
     const today = this.formatUtcDate8(new Date());
     const dates: Array<[string, string | undefined]> = [
-      ['subscriber.dateOfBirth', claim.subscriber?.dateOfBirth],
+      ['subscriber.birthDate', claim.subscriber?.birthDate],
       ['admissionDate', claim.admissionDate],
       ['dischargeDate', claim.dischargeDate],
       ...claim.serviceLines.map((line, index) => [`serviceLines[${index}].serviceDate`, line.serviceDate] as [string, string]),
@@ -234,8 +235,8 @@ export class X12BuilderService {
       }
     }
     const zipFields: Array<[string, string | undefined]> = [
-      ['billingProvider.zip', claim.billingProvider?.zip],
-      ['subscriber.zip', claim.subscriber?.zip],
+      ['billingProvider.address.zip', claim.billingProvider?.address?.zip],
+      ['subscriber.address.zip', claim.subscriber?.address?.zip],
     ];
     for (const [field, zip] of zipFields) {
       if (zip?.includes('-')) {
@@ -446,12 +447,9 @@ export class X12BuilderService {
     const now = new Date();
     const date = this.formatDate8(now);
     const time = this.formatTime4(now);
-    const billing = claim.billingProvider as ClaimProvider;
+    const billing = claim.billingProvider as BillingProvider;
     const subscriber = claim.subscriber as ClaimSubscriber;
-    const placeOfService = this.requiredText(
-      claim.serviceLines.find((line) => line.placeOfService)?.placeOfService,
-      'Place of service',
-    );
+    const placeOfService = this.requiredText(claim.placeOfService, 'Place of service');
     const body: string[] = [
       this.seg('BHT', ['0019', '00', this.text(claim.claimControlNumber), date, time, 'CH']),
       this.seg('NM1', ['41', '2', this.requiredText(billing.name, 'Billing provider name'), '', '', '', '', '46', this.submitterId()]),
@@ -505,7 +503,17 @@ export class X12BuilderService {
     return edi;
   }
 
-  private billingProviderLoops(billing: ClaimProvider): string[] {
+  private addressSegments(address: ClaimAddress | undefined): string[] {
+    if (!address?.address1) {
+      return [];
+    }
+    return [
+      this.seg('N3', [this.text(address.address1), this.text(address.address2)]),
+      this.seg('N4', [this.text(address.city), this.text(address.state).toUpperCase(), this.text(address.zip).replace(/-/g, '')]),
+    ];
+  }
+
+  private billingProviderLoops(billing: BillingProvider): string[] {
     const segments = [
       this.seg('HL', ['1', '', '20', '1']),
     ];
@@ -515,10 +523,7 @@ export class X12BuilderService {
     segments.push(
       this.seg('NM1', ['85', '2', this.requiredText(billing.name, 'Billing provider name'), '', '', '', '', 'XX', this.text(billing.npi)]),
     );
-    if (billing.address1) {
-      segments.push(this.seg('N3', [this.text(billing.address1), this.text(billing.address2)]));
-      segments.push(this.seg('N4', [this.text(billing.city), this.text(billing.state).toUpperCase(), this.text(billing.zip).replace(/-/g, '')]));
-    }
+    segments.push(...this.addressSegments(billing.address));
     segments.push(this.seg('REF', ['EI', this.text(billing.taxId).replace(/\D/g, '')]));
     return segments;
   }
@@ -539,21 +544,10 @@ export class X12BuilderService {
         this.text(subscriber.memberId),
       ]),
     ];
-    if (subscriber.address1) {
-      segments.push(this.seg('N3', [this.text(subscriber.address1), this.text(subscriber.address2)]));
-      segments.push(
-        this.seg('N4', [this.text(subscriber.city), this.text(subscriber.state).toUpperCase(), this.text(subscriber.zip).replace(/-/g, '')]),
-      );
-    }
-    if (subscriber.dateOfBirth || subscriber.gender) {
-      segments.push(
-        this.seg('DMG', [
-          'D8',
-          subscriber.dateOfBirth ? this.formatDate8(subscriber.dateOfBirth) : '',
-          this.text(subscriber.gender).toUpperCase(),
-        ]),
-      );
-    }
+    segments.push(...this.addressSegments(subscriber.address));
+    segments.push(
+      this.seg('DMG', ['D8', this.formatDate8(subscriber.birthDate), this.text(subscriber.gender).toUpperCase()]),
+    );
     segments.push(this.seg('NM1', ['PR', '2', 'PAYER', '', '', '', '', 'PI', this.text(claim.tradingPartnerId)]));
     if (claim.dependent) {
       segments.push(...this.dependentLoops(claim.dependent));

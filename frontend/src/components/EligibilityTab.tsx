@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { CoverageInquiryPayload, postCoverageInquiry } from '../lib/api';
-import { Badge, ErrorPanel, Field, Spinner, inputClass } from './ui';
+import { Badge, ErrorPanel, Field, FillSelect, Spinner, inputClass } from './ui';
 
 interface EligibilityForm {
   payerId: string;
@@ -43,6 +43,28 @@ const emptyForm: EligibilityForm = {
   procedureCode: '',
   serviceDate: '',
 };
+
+const johnDoe: EligibilityForm = {
+  payerId: '00001',
+  memberId: 'MEM8941029',
+  patientFirstName: 'JOHN',
+  patientLastName: 'DOE',
+  patientBirthDate: '1985-04-12',
+  patientGender: 'M',
+  providerNpi: '1234567893',
+  serviceTypeCode: '30',
+  procedureCode: '',
+  serviceDate: '',
+};
+
+const fillOptions = [
+  { id: 'john-doe-plan', label: 'JOHN DOE — health benefit plan (payer 00001)', value: johnDoe },
+  {
+    id: 'john-doe-visit',
+    label: 'JOHN DOE — office visit 99213',
+    value: { ...johnDoe, serviceTypeCode: '98', procedureCode: '99213', serviceDate: '2026-09-10' },
+  },
+];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
@@ -244,6 +266,7 @@ export default function EligibilityTab() {
               POST /api/availity/eligibility. The API submits form fields to /availity/v1/coverages and polls GET /availity/v1/coverages/&#123;id&#125; while statusCode is 0.
             </p>
           </div>
+          <FillSelect options={fillOptions} onFill={setForm} onClear={() => setForm(emptyForm)} />
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Payer ID">
               <input className={inputClass} required value={form.payerId} onChange={(event) => update('payerId', event.target.value)} />

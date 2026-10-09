@@ -1,9 +1,19 @@
 import 'reflect-metadata';
 import { Logger, ValidationPipe } from '@nestjs/common';
+import { existsSync } from 'fs';
+import { resolve } from 'path';
 import { validateAvailityConfigOrThrow } from './config/availity-env';
+
+function loadDotEnv(): void {
+  const envPath = resolve(process.cwd(), '.env');
+  if (!existsSync(envPath)) return;
+  // Shell-exported variables take precedence over .env values.
+  (process as unknown as { loadEnvFile(path: string): void }).loadEnvFile(envPath);
+}
 
 async function bootstrap() {
   const logger = new Logger('AvailityEngine');
+  loadDotEnv();
   validateAvailityConfigOrThrow(process.env);
 
   const { NestFactory } = await import('@nestjs/core');

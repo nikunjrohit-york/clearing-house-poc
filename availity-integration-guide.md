@@ -1,232 +1,456 @@
-# Availity Clearinghouse Integration — Guide & Gap Analysis for Delphi
+# Availity Integration Guide
 
-Based on: Availity support case **18993019** (closed 9/25/2026), the **Batch EDI Standard Companion Guide v.20260429**, and current Availity Developer Portal documentation.
+Architectural description of the Availity clearinghouse integration in this repository: how data moves, what is already wired through, what is still outstanding, and how the Developer Portal, QA Essentials, and environment variables fit together.
+
+Availity is one of two clearinghouses in the dashboard. Optum uses `OPTUM_*` configuration and `backend/src/optum/`. It does not share a client, token, or route with Availity.
+
+Contract-specific values that are not in this repository are marked `[FILL IN: …]`.
 
 ---
 
-## 1. What actually happened in the ticket
+## 1. Architectural overview
 
-Delphi tried to reach claim submission, claim status, and remittance through **REST API endpoints** using a **Demo API key**. Availity's response (Cortney Lawson, 9/25) clarifies each one:
+### 1.1 System context
 
-| What was tried | Why it 404'd | What actually works |
+The integration is a NestJS process and a React dashboard. The browser never calls Availity. It calls this application, and the application calls Availity on one of two channels.
+
+| Channel | Availity product | Used for |
 |---|---|---|
-| `POST /availity/v1/professional-claims` | This is the **Patient Cost Estimator (PCE)** endpoint, not 837 claim submission | Claims are **not submitted via this REST endpoint at all** — see §2 |
-| `POST /availity/claims` | Not a real Availity path | — |
-| SFTP `sftp.availity.com:22` | Wrong host — Availity migrated to a new **managed file transfer (MFT)** platform | `files.availity.com` (prod) / `qa-files.availity.com` (QA), port 22, SFTP |
-| `.../clmsmgmt/claim-status/.../searchBy276` | This is **Enhanced Claim Status**, a paid add-on **not available in Demo** | Standard Claim Status: `POST /v1/claim-statuses`, `GET /v1/claim-statuses/{id}` |
-| `POST /v2/Apic/searchChecks`, `/remittance-data-api/v1/checks/search` | Availity's **Remittance Data API is in closed BETA**, not in prod or Demo, no ETA | ERA/835 files delivered only through **Batch EDI (SFTP)** once enrolled |
+| HTTPS REST, OAuth 2.0 client credentials | Healthcare HIPAA Transactions, plus the Payment Accuracy edits resource | Eligibility, pre-submit 837 edits, single-claim status |
+| SFTP to the managed file gateway | Batch EDI | 837P submission, upload notifications, IBR/EBR/DPR/999/TA1 retrieval |
 
-**Bottom line from Availity:** only Eligibility (Coverages 270/271) is confirmed working on the Demo key. Everything else Delphi needs — claim submission, claim status, and remittance — is **not exposed as REST in Demo/current contract** and routes through **Batch EDI over SFTP** instead.
+Claim submission and remittance advice are batch files. Eligibility and claim status are real-time REST calls. Pre-submit edits are a third REST call: the application generates an 837P locally, sends that payload to Payment Accuracy, and only then uploads the same payload over SFTP.
 
----
+```text
+Browser
+  React dashboard  :5173
+  Availity tabs: Eligibility | Batch 837 Builder | Live Reports
+        |
+        |  /api/*   Vite dev proxy
+        v
+NestJS  :3000
+  AvailityController          /api/availity/*
+  AvailityRestService         OAuth + JSON/form calls
+  X12BuilderService           837P (005010X222A1)
+  EdiParserService            inbound pipe reports and 999/TA1
+  SftpService                 one connection per operation
+  SftpPollerCron              /ReceiveFiles every 15 minutes, in-memory store
+        |
+        +-- HTTPS --> api.availity.com
+        |
+        +-- SFTP  --> qa-files.availity.com:22     (QA, ISA15=T)
+                      files.availity.com:22        (production, ISA15=P)
+                      /SendFiles    outbound 837 and upload notifications
+                      /ReceiveFiles inbound acknowledgements and reports
+```
 
-## 2. The two integration paths — and which one Delphi needs
+There is no database. Configuration is environment variables validated at boot. Parsed inbound reports live in a `Map` on `SftpPollerCron` and are gone when the process stops. Interchange control numbers are the exception: `X12BuilderService` persists ISA13 outside the process so a restart does not reuse a control number.
 
-Availity offers two separate, non-overlapping product families. They are **not different ways to do the same thing** — they cover different transaction sets.
+### 1.2 Components
 
-| | **Batch EDI (SFTP)** | **Healthcare HIPAA Transactions REST APIs** |
+**Dashboard (`frontend/src`).** `App.tsx` switches between Availity and Optum. On the Availity side it mounts one tab at a time:
+
+| Tab | Component | Application calls |
 |---|---|---|
-| Claim submission (837P/I/D) | ✅ Yes — this is the only way | ❌ Not available (no REST 837 submission product) |
-| Remittance / ERA (835) | ✅ Yes, once enrolled per payer | ❌ Remittance Data API is BETA, not usable |
-| Claim status (276/277) | ✅ Via batch, or... | ✅ Standard Claim Statuses API (real-time, per-claim) |
-| Eligibility (270/271) | Possible but usually not worth batching | ✅ Coverages API — **this is what's already working** |
-| Auth/referral (278) | ✅ Via batch | ✅ Service Reviews API |
-| Volume model | Bulk files, near-real-time turnaround | Real-time, one call per request |
-| Auth | SFTP username/password | OAuth 2.0 client-credentials (bearer token) |
+| Eligibility | `EligibilityTab` | `POST /api/availity/eligibility` |
+| Batch 837 Builder | `BatchClaimTab` | `POST /api/availity/claims/validate`, then `POST /api/availity/claims/batch-submit`, then `GET /api/availity/claims/batch-status/:fileName` |
+| Live Reports | `ReportsTab` | `GET /api/availity/reports`, `POST /api/availity/reports/poll` |
 
-**Conclusion:** For Delphi's PR-first allocation + payment waterfall engine, the core dependency — **submitting claims and receiving remittances** — has to be built on **Batch EDI / SFTP**, not REST. The REST APIs are a good fit only for two things Delphi doesn't currently need in bulk: real-time eligibility checks (already working) and real-time single-claim status lookups.
+`frontend/src/lib/api.ts` is the only HTTP client. It sends JSON and surfaces the response body on any non-2xx status. `frontend/vite.config.ts` proxies `/api` to `http://localhost:3000`, so the browser talks only to the Vite origin.
+
+**HTTP boundary (`AvailityController`).** All Availity routes sit under `/api/availity`. The controller does not contain vendor logic. It validates the body, calls a service, and returns that service’s result.
+
+| Method | Path | Work |
+|---|---|---|
+| `POST` | `/api/availity/eligibility` | Coverage inquiry |
+| `POST` | `/api/availity/claims/validate` | Build 837P, send it to Payment Accuracy, return edits plus the X12 |
+| `POST` | `/api/availity/claims/batch-submit` | Build 837P, upload `BATCH_<ISA13>.txt` to `/SendFiles` |
+| `GET` | `/api/availity/claims/batch-status/:fileName` | Read the upload notification from `/SendFiles` |
+| `POST` | `/api/availity/claim-status` | Submit a claim-status inquiry |
+| `GET` | `/api/availity/claim-status/:id` | Read a claim-status result |
+| `GET` | `/api/availity/reports` | List reports already parsed in this process |
+| `POST` | `/api/availity/reports/poll` | Download `/ReceiveFiles` now, parse, then list |
+
+Global pipes whitelist and transform bodies. `AvailityExceptionFilter` turns service failures into `{ error, op, upstream }` and keeps the upstream HTTP status.
+
+**REST client (`AvailityRestService`).** One Axios instance pointed at `AVAILITY_BASE_URL`. On module init it obtains a token. The token is cached until 60 seconds before `expires_in` (Availity issues about 300 seconds). Concurrent callers share one in-flight token request. A 401 refreshes the bearer once and retries. 502, 503, and 504 retry with backoff, up to three times. Every other upstream status is returned as-is.
+
+**EDI builder (`X12BuilderService`).** `build837Claim` is the method on the live path. It checks the QA/production pairing (`AVAILITY_SFTP_HOST` with `AVAILITY_USAGE_INDICATOR`), applies companion-guide edits, and emits a HIPAA 5010 professional claim (`005010X222A1`). Envelope identifiers come from configuration: submitter id in ISA06, receiver id in ISA08 (`030240928` unless `AVAILITY_RECEIVER_ID` overrides it), usage indicator in ISA15. Delimiters are `*` (element), `:` (component), `~` (segment), `^` (repetition).
+
+`build270EligibilityRequest` and `build276ClaimStatusRequest` exist in the same service. The running eligibility and claim-status routes do not call them. Those routes use the REST APIs below.
+
+**EDI parser (`EdiParserService`).** `parse` classifies a downloaded file and returns a structured report. Pipe-delimited IBR, IBRP, EBR, and DPR become claim rows (patient, date, control number, charge, billing id, status, and note groups). X12 999 and TA1 become acknowledgement results. A row missing a patient name or control number is recorded as a row error and is not stored as a claim. `summarize` produces the counts the poller logs.
+
+**SFTP (`SftpService`).** Each upload, listing, or download opens a connection and closes it in `finally`. Authentication is the mailbox password or a PEM key, never both. Remote directories come from `AVAILITY_SFTP_SEND_PATH` and `AVAILITY_SFTP_RECEIVE_PATH`.
+
+**Poller (`SftpPollerCron`).** A cron of `0 */15 * * * *` downloads `/ReceiveFiles`. A `running` flag skips a tick that overlaps the previous one. Files already seen (name, size, and modified time) are skipped. New files are parsed and stored in memory. `POST /api/availity/reports/poll` calls the same method.
+
+**Configuration.** `AvailityConfigModule` loads `.env.local` and `.env` through Joi. `main.ts` also runs `validateAvailityConfigOrThrow` before the Nest application is constructed, so a missing credential stops the process. Outside `NODE_ENV=test` there is no substitute client and no canned vendor response.
+
+### 1.3 Data flows
+
+**Eligibility.**
+
+```text
+EligibilityTab
+  POST /api/availity/eligibility          CoverageInquiryDto
+    -> AvailityRestService.checkEligibility
+         -> POST /availity/v1/token         (only when the cache is cold)
+         -> POST /availity/v1/coverages     application/x-www-form-urlencoded
+         -> GET  /availity/v1/coverages/{id}
+              repeated while statusCode is 0
+              interval AVAILITY_COVERAGE_POLL_INTERVAL_MS (2000)
+              attempts AVAILITY_COVERAGE_POLL_ATTEMPTS (15)
+              stop on statusCode 3 or 4
+    <- coverage JSON to the tab
+```
+
+The form body carries payer id, provider NPI, member id, patient name, birth date, optional gender, `serviceType[]` from `serviceTypeCode`, optional procedure code, and `submitterId` from `AVAILITY_SUBMITTER_ID`.
+
+**Claim validation (`POST /api/availity/claims/validate`).**
+
+```text
+BatchClaimTab claim form
+  POST /api/availity/claims/validate       ClaimInputDto
+    -> X12BuilderService.build837Claim     local 837P string
+    -> AvailityRestService.validateClaimX12
+         -> POST /api/v1/payment-accuracy/x12/edits
+              {
+                payload: "<837P>",
+                traceIdentifier: "<uuid>",
+                customerIdentifier: "<billing tax id NN-NNNNNNN>",
+                payerIdentifier: "<tradingPartnerId>",
+                lineOfBusiness: "COM"
+              }
+    <- {
+         valid: triggeredResult.length === 0,
+         triggeredResult,
+         transactionIdentifier,
+         x12Payload
+       }
+```
+
+The Batch tab treats this response as a gate. On submit it calls validate again, and it uploads only when no entry in `triggeredResult` has severity `error`.
+
+**Batch submission and notification.**
+
+```text
+BatchClaimTab
+  POST /api/availity/claims/batch-submit
+    -> build837Claim
+    -> read ISA13 (9 digits) from the first segment
+    -> SftpService.uploadBatchFile
+         file name BATCH_<ISA13>.txt
+         directory /SendFiles
+    <- file name, remote path, size, uploadedAt, claim control number, status URL
+
+  GET /api/availity/claims/batch-status/:fileName
+    -> SftpService.checkUploadNotification
+         looks in /SendFiles for <file>-success or <file>-FAILED
+         also accepts the batch-id form <file>-<digits>-success|-FAILED
+    <- UPLOADED notification state, or PENDING when the listing succeeds and no notification is present yet
+```
+
+**Inbound reports.**
+
+```text
+cron every 15 minutes, or ReportsTab "Poll"
+  POST /api/availity/reports/poll
+    -> SftpService.downloadReceiveFiles      /ReceiveFiles
+    -> EdiParserService.parse + summarize
+    -> Map keyed by file name
+  GET /api/availity/reports
+    <- { count, reports }
+```
+
+**Claim status (API only).**
+
+```text
+POST /api/availity/claim-status          ClaimStatusQueryDto
+  -> POST /v1/claim-statuses
+       payer, NPI, member, patient, patientAccountNumber,
+       submitterId, fromDate, toDate
+GET  /api/availity/claim-status/:id
+  -> GET  /v1/claim-statuses/{id}
+```
+
+No Availity tab calls these two routes today. The builders for a batch 276 file are also unused by the controller.
+
+### 1.4 What each Availity API is in this design
+
+| Application action | Availity resource | Role in the design |
+|---|---|---|
+| Token | `POST {AVAILITY_TOKEN_URL}` default `https://api.availity.com/availity/v1/token` | `grant_type=client_credentials`, `client_id`, `client_secret`, optional `scope` and `realm`. Bearer on every later REST call |
+| Eligibility | `POST` and `GET /availity/v1/coverages` | Real-time 270/271. Async: create, then poll by id |
+| Pre-submit edits | `POST /api/v1/payment-accuracy/x12/edits` | Accepts the 837P this app just built. Returns `triggeredResult` |
+| Claim status | `POST` and `GET /v1/claim-statuses` | Real-time 276/277 for one claim. Same async shape as Coverages |
+| File drop | SFTP `/SendFiles` | The 837P submission. Availity writes a success or failure notification back into this folder |
+| File pickup | SFTP `/ReceiveFiles` | ACK, TA1, 999, IBR/IBRP, EBR, DPR, and ERA/835 after enrollment |
+
+Payer List (`GET /v1/availity-payer-list`) and Configurations (`GET /v1/configurations`) are part of Availity’s HIPAA product family and are not called by this service. Patient Cost Estimator (`/availity/v1/professional-claims`) is a predetermination product. This design does not use it as claim submission.
+
+### 1.5 Working 837P batch payload
+
+`POST /api/availity/claims/validate` and `POST /api/availity/claims/batch-submit` take the same `ClaimInputDto`. Validate returns edits. Batch-submit uploads the 837P and answers **202 Accepted** with the SFTP receipt.
+
+The body below is the shape that produced a successful QA upload. `tradingPartnerId` and `claimControlNumber` sit on the root. `placeOfService` is sent on the claim and on every service line. `frequencyCode` is `1` through `8` (original is `1`). Billing `name` is the organization name when a personal name is not supplied. Subscriber birth date is `birthDate` (`YYYY-MM-DD`). Addresses are nested. The primary diagnosis cannot start with `E`. Each `lineNumber` is its 1-based position, and `diagnosisPointer` is a string.
+
+```json
+{
+  "claimType": "professional",
+  "tradingPartnerId": "00001",
+  "claimControlNumber": "CLM123456",
+  "frequencyCode": "1",
+  "placeOfService": "11",
+  "billingProvider": {
+    "name": "The Delphi Group LLC",
+    "organizationName": "The Delphi Group LLC",
+    "npi": "1194476978",
+    "taxId": "27-2499372",
+    "address": {
+      "address1": "100 Main St",
+      "city": "Concord",
+      "state": "NH",
+      "zip": "03301"
+    }
+  },
+  "subscriber": {
+    "firstName": "John",
+    "lastName": "Doe",
+    "memberId": "MEM123456",
+    "birthDate": "1980-01-01",
+    "gender": "M",
+    "address": {
+      "address1": "200 Elm St",
+      "city": "Concord",
+      "state": "NH",
+      "zip": "03301"
+    }
+  },
+  "diagnoses": [
+    { "code": "I10" }
+  ],
+  "serviceLines": [
+    {
+      "lineNumber": 1,
+      "procedureCode": "99213",
+      "quantity": 1,
+      "unitPrice": 100.00,
+      "serviceDate": "2026-03-01",
+      "placeOfService": "11",
+      "diagnosisPointer": "1"
+    }
+  ],
+  "totalCharge": 100.00
+}
+```
+
+`POST /api/availity/claims/batch-submit` responds 202:
+
+```json
+{
+  "fileName": "BATCH_765617208.txt",
+  "remotePath": "/SendFiles/BATCH_765617208.txt",
+  "byteSize": 640,
+  "uploadedAt": "2026-10-09T06:38:58.374Z",
+  "status": "UPLOADED",
+  "claimControlNumber": "CLM123456",
+  "interchangeControlNumber": "765617208",
+  "statusUrl": "/api/availity/claims/batch-status/BATCH_765617208.txt"
+}
+```
+
+`fileName` is `BATCH_` plus the 9-digit ISA13. `statusUrl` is the notification poll for that file. The interchange control number changes on every build.
+
+Local rules enforced by `ClaimInputDto` and `X12BuilderService` before the SFTP upload:
+
+- Professional claims only on the 837P builder.
+- `tradingPartnerId` and `claimControlNumber` are required strings.
+- `frequencyCode` is `1`–`8`. An empty value becomes `1`. The builder still refuses frequency `6` (corrected) under the companion-guide edit.
+- `placeOfService` is required on the claim and on each service line. An empty value becomes `11`.
+- Billing NPI is 10 digits and passes the NPI checksum. Tax id matches `NN-NNNNNNN`.
+- Billing `name` is copied from `organizationName` when name is blank, and the reverse when only name is sent.
+- Billing and subscriber addresses require `address1`, `city`, `state`, and a ZIP of 5 or 9 digits with no dash.
+- Subscriber `gender` is `M` or `F`. `birthDate` and each `serviceDate` are `YYYY-MM-DD`.
+- `diagnoses` is `[{ code }]`. `diagnoses[0].code` cannot start with `E`.
+- `lineNumber` is the 1-based index of that line. `diagnosisPointer` is a string such as `"1"`.
+- `totalCharge` equals the cent-exact sum of `quantity × unitPrice`.
+- At most 50 service lines. Service dates must be before the UTC day the 837 is built.
+- ISA15 `P` is refused when the host is `qa-files.availity.com`, and ISA15 `T` is refused when the host is `files.availity.com`, unless `AVAILITY_ALLOW_ENV_MISMATCH=true`.
+
+The Batch 837 Builder tab applies the same defaults before it posts: frequency `1`, place of service `11` on the claim and every line, sequential `lineNumber`, `diagnosisPointer` `"1"`, and billing `name` set from the organization name. It blocks a primary diagnosis that starts with `E` before the request leaves the browser. A 403 from pre-validation shows a warning and still allows the SFTP upload. The checkbox **Submit Directly via SFTP (Skip Pre-Validation)** posts to `/api/availity/claims/batch-submit` without calling validate.
+
+`CoverageInquiryDto` and `ClaimStatusQueryDto` are the eligibility and claim-status bodies. They stay on the REST channel and never become an X12 file in the running application.
 
 ---
 
-## 3. Batch EDI / SFTP — full integration guide
+## 2. Implementation diagnosis
 
-### 3.1 Account setup (do this first)
+Assessment of the tree as it stands. “Integrated” means the UI or HTTP route, the domain service, and the Availity channel are connected and the process will perform that call with live credentials.
 
-1. **Organization registration** — done already (Delphi is Customer ID 805925). Skip.
-2. **Create a QA EDI account** (separate from your Essentials login):
-   - Log in to `https://qa-essentials.availity.com`
-   - `Claims & Payments → FTP and EDI Connection Services → Manage Your FTP Mailbox`
-   - Select org → set a username/password → Create Account
-3. **Create a Production EDI account** the same way at `https://essentials.availity.com`.
-4. **Password policy** (both environments): min 14 chars, needs upper/lower/number/special char, can't reuse last 12, expires every 12 months, account locks after 3 failed logins or 90 days idle.
-5. **Configure EDI Reporting Preferences** — this decides which response files you actually receive (ACK, 999, IBR/IBRP, EBR, DPR, 277CA, ERA/835) and how they're grouped (by org, by provider, by payer). Do this before you start testing — if it's not turned on here, the file never lands in `ReceiveFiles`.
-6. **Enroll for ERA/835 delivery** per payer, via the Availity payer list — this is separate from claim submission enrollment. If ERAs are already flowing to Availity from a payer today, skip.
-7. Assign the **EDI Management** role to whichever Delphi users/service accounts need to push files through Essentials (not needed for the SFTP client path).
+### 2.1 Integrated end to end
 
-### 3.2 Connection details
+**1. Boot and configuration.** `main.ts` loads `backend/.env`, then refuses to start unless the REST client id and secret, the SFTP host and username, and either a password or a private-key path are set. Joi repeats that check and also requires submitter id and receiver id. QA host and test indicator are paired, as are the production host and production indicator.
 
-| Field | QA | Production |
+**2. OAuth.** `AvailityRestService` requests a client-credentials token from `AVAILITY_TOKEN_URL` at startup, caches it, and attaches it to later calls. Scope defaults to `hipaa`. Realm is sent only when `AVAILITY_REALM` is set.
+
+**3. Eligibility.** The Eligibility tab posts a coverage inquiry. The REST service submits `POST /availity/v1/coverages` and polls `GET /availity/v1/coverages/{id}` until the status code leaves `0` or the attempt budget runs out. This is the HIPAA transaction confirmed on the Demo subscription in support case 18993019.
+
+**4. 837P generation.** `build837Claim` produces a 5010 professional claim from `ClaimInputDto`, including the Availity envelope (submitter, receiver `030240928`, delimiters, ISA15) and a persisted interchange control number.
+
+**5. Pre-submit validation.** `POST /api/availity/claims/validate` is wired from the Batch tab through the controller to `validateClaimX12`. The generated 837P is the `payload`. The billing tax id is `customerIdentifier`. The trading partner id is `payerIdentifier`. Line of business is the constant `COM`. The tab renders `triggeredResult` and uses error-severity edits as the gate in front of upload.
+
+**6. Batch upload.** `POST /api/availity/claims/batch-submit` uploads that 837P to `/SendFiles` as `BATCH_<ISA13>.txt`. The status route then looks for Availity’s success or failure notification in the same folder. The Batch tab polls that status URL after a successful upload.
+
+**7. Inbound acknowledgement and claim reports.** The 15-minute poller and the Live Reports poll button download `/ReceiveFiles`, parse IBR, IBRP, EBR, DPR, 999, and TA1, and show the in-memory list. Duplicate files are skipped. A malformed row does not discard the rest of the file.
+
+**8. Failure shape.** REST and SFTP failures leave the service as typed errors. The filter returns `error`, `op`, and `upstream` so the dashboard can show the operation that failed. The REST client refreshes once on 401 and retries only gateway timeouts.
+
+### 2.2 Present in the codebase, not on the Availity user path
+
+| Piece | Where | State |
+|---|---|---|
+| `build270EligibilityRequest` | `X12BuilderService` | Implemented. Eligibility runs through Coverages REST, so this builder has no controller caller |
+| `build276ClaimStatusRequest` | `X12BuilderService` | Implemented. No controller caller. Live claim status, where used, is REST |
+| `POST /api/availity/claim-status` and `GET /api/availity/claim-status/:id` | `AvailityController`, `AvailityRestService` | Backend route and Availity client are in place. The Availity half of the dashboard has no tab that calls them |
+| `listSendFiles` / `listReceiveFiles` | `SftpService` | Used by notification check and download. No separate admin API |
+| Optum workflow | `backend/src/optum`, Optum tabs | A second clearinghouse in the same shell. It starts as the default house in `App.tsx`. It is not an Availity component |
+
+### 2.3 Not built yet
+
+| Gap | Why it is still open |
+|---|---|
+| ERA/835 ingestion | `/ReceiveFiles` can hold `.era` files after per-payer enrollment. `EdiParserService` does not turn an 835 into payments, and there is no posting API |
+| 837I and 837D | The claim-type enum includes institutional and dental. `build837Claim` emits professional only |
+| Durable report and batch store | Poll results and upload state are process memory. A restart clears the Live Reports list. Production needs a database keyed by file name and ISA13 |
+| Push delivery | Availity does not offer a file webhook. The design is poll-based, which is already implemented; a queue or external scheduler is not |
+| Payer rules from Configurations | Required fields are the local DTO and companion-guide checks. Per-payer configuration is not fetched or cached |
+| Payer-list sync | The channel and contract flag per payer are not stored locally |
+| Oxygen-therapy and home-health segments | Claims that set `oxygenTherapy` or `homeHealth` are rejected until the procedure-code map is confirmed |
+| Medicare SSN edit | Payer ids that should be treated as Medicare are not confirmed, so that edit is not applied from a maintained list |
+
+### 2.4 Portal and contract items still outside the code
+
+These are configuration and enrollment tasks. The code paths exist; the Availity account has to authorize them.
+
+| Item | Status to confirm |
+|---|---|
+| Developer Portal app subscribed to Coverages | Required for the eligibility flow. Demo subscription is the one the support case verified |
+| Same app subscribed to the product that serves `POST /api/v1/payment-accuracy/x12/edits` | Required for `/api/availity/claims/validate` to be accepted. Scope and `customerIdentifier` (billing TIN versus Availity customer id) must match that product’s reference. `[FILL IN: product name, scope string, identifier type]` |
+| Same app subscribed to Claim Statuses | Required before the claim-status routes are a supported integration. `[FILL IN: included in current plan, or separate subscription]` |
+| QA mailbox on `qa-files.availity.com` | Required for batch upload and report poll. Username and password are the mailbox, not the Essentials login |
+| EDI reporting preferences | Decide which of ACK, 999, IBR/IBRP, EBR, DPR, 277CA, and ERA land in `/ReceiveFiles`, and the grouping (organization, provider, or payer). `[FILL IN: preferences currently selected]` |
+| ERA enrollment per payer | Required before 835 files arrive. Independent of 837 submission enrollment. `[FILL IN: payers already enrolled]` |
+| Production mailbox and Standard-plan API credentials | Not implied by the QA mailbox or the Demo key. `[FILL IN: production client id provisioned, production mailbox provisioned]` |
+| Trading partner ids | `AVAILITY_SUBMITTER_ID` and `AVAILITY_RECEIVER_ID` must be the ids Availity assigned. Receiver default in the companion guide is `030240928` |
+
+### 2.5 Reading the current state in one pass
+
+The closed loop that the POC can exercise is: eligibility over REST, local 837P construction, Payment Accuracy edits, SFTP submit, notification poll, and inbound report parse. Remittance posting, institutional and dental claims, a claim-status screen, and any store that survives a restart are the remaining product work. Demo Coverages is the REST product the vendor has already confirmed; Payment Accuracy and standard claim status still depend on the subscriptions recorded in the Developer Portal.
+
+---
+
+## 3. Environment and portal setup
+
+Two Availity sites provision this integration. Credentials from one do not satisfy the other.
+
+| Site | What you create | Configuration it fills |
+|---|---|---|
+| Developer Portal, `https://developer.availity.com` | Application, client id, client secret, per-product subscription and scope | `AVAILITY_CLIENT_ID`, `AVAILITY_CLIENT_SECRET`, `AVAILITY_SCOPE`, `AVAILITY_TOKEN_URL` |
+| QA Essentials, `https://qa-essentials.availity.com` | QA FTP mailbox, EDI reporting preferences, QA ERA enrollment | `AVAILITY_SFTP_*` with host `qa-files.availity.com` and `AVAILITY_USAGE_INDICATOR=T` |
+| Production Essentials, `https://essentials.availity.com` | Production mailbox and production reporting preferences | Host `files.availity.com` and `AVAILITY_USAGE_INDICATOR=P`, plus a Standard-plan API client |
+
+`[FILL IN: which login owns the Developer Portal app, which login owns the Essentials mailbox admin, and the Availity customer id on the contract.]` Support case 18993019 recorded customer id `805925`.
+
+### 3.1 Developer Portal
+
+1. Sign in at `https://developer.availity.com`.
+2. Create an application, or open the one already tied to this contract. The app is the OAuth client. Availity displays the client secret once. Store it outside the repository. A lost secret is reset from the app’s Client Secret section; the previous value cannot be recovered.
+3. Subscribe the app to a plan.
+   - **Demo** is approved automatically. It is the sandbox plan (canned or non-production data). The API Guide dated 10/31/2025 states a limit of 5 transactions per second and 500 per day. Token calls, the initial request, and each eligibility poll all count. Case 18993019 described 3 per second. `[FILL IN: the limit shown on this app.]`
+   - **Standard** is the live plan. Trading Partner Management activates it after a support request (Essentials → Help & Training → Availity Support, case reason API) or the portal’s sales contact.
+4. On the app’s approved-access list, subscribe each product this design calls: Coverages, the Payment Accuracy edits product, and Claim Statuses if those routes will be used. A plan subscription does not by itself add every product.
+5. Copy the scope from each product’s client info. This service sends a single `AVAILITY_SCOPE` on the token request. The published Coverages example uses `hipaa`. When a product page lists two scopes, put them in that variable separated by one space.
+6. Copy the token URL from the same page into `AVAILITY_TOKEN_URL`. This repository defaults to `https://api.availity.com/availity/v1/token`, which is the URL in the current API Guide.
+
+`[FILL IN: app name, plan, products under Approved Access, and the scope string for Payment Accuracy.]`
+
+### 3.2 QA Essentials mailbox
+
+1. Sign in at `https://qa-essentials.availity.com`.
+2. Open Claims & Payments → FTP and EDI Connection Services → Manage Your FTP Mailbox.
+3. Select the organization, choose a mailbox username and password, and create the account. This username is `AVAILITY_SFTP_USERNAME`. It is not the Essentials user id.
+4. Mailbox password policy from the companion guide: at least 14 characters with upper, lower, digit, and special character; cannot reuse the last 12 passwords; expires every 12 months; locks after 3 failed logins or 90 days idle.
+5. Set EDI reporting preferences before the first test upload. Those preferences choose which response files Availity writes to `/ReceiveFiles` and how they are grouped. `[FILL IN: the preference set for this organization.]`
+6. Enroll ERA/835 per payer when remittance files are part of the test. `[FILL IN: payer ids enrolled in QA.]`
+7. Assign the EDI Management role to people who upload through the Essentials UI. The SFTP client in this repo authenticates as the mailbox and does not use that role.
+
+| | QA | Production |
 |---|---|---|
 | Host | `qa-files.availity.com` | `files.availity.com` |
-| Port | 22 (SFTP) | 22 (SFTP) |
-| Auth | username/password (Normal login) | username/password |
-| Browser alternative | `https://qa-files.availity.com` | `https://files.availity.com` |
+| Port | 22 | 22 |
+| Drop 837 files | `/SendFiles` | `/SendFiles` |
+| Pick up responses | `/ReceiveFiles` | `/ReceiveFiles` |
+| ISA15 | `T` | `P` |
+| Browser file UI | `https://qa-files.availity.com` | `https://files.availity.com` |
 
-Folders: **`SendFiles`** (you drop 837/276/270/278/275 files here) and **`ReceiveFiles`** (Availity drops all response/report/ERA files here).
+QA uploads are structurally validated and are not forwarded to the payer. Production Essentials (`https://essentials.availity.com`) is the same mailbox procedure with production credentials and `AVAILITY_USAGE_INDICATOR=P`. Keep QA and production values in separate env files. This process has one configuration.
 
-### 3.3 Integration testing (do this before touching production)
+### 3.3 Environment variables
 
-- Coordinated free-of-charge through Availity Client Services — you need them to provision your QA login.
-- Test in QA using `ISA15 = T` (test indicator). Test files auto-reject after passing structural validation — they never reach the payer.
-- **Do not** test in production with `ISA15 = P` unless you mean it — Availity forwards it to the payer regardless of the indicator; `ISA15=T` in prod only prevents payer routing, it still isn't a safe default for real testing.
-- Same upload/download/reporting-preferences mechanics apply in both environments.
-
-### 3.4 Submitting a batch (837 claim file)
-
-1. Build the X12 837 file (837P `005010X222A1` for professional, 837I `005010X223A2` institutional).
-2. Drop it into `SendFiles` (SFTP client or `https://files.availity.com` web upload — max 5 files/upload, 150 MB/file via web).
-3. Availity returns a **notification file** to `SendFiles`: `<original-filename>-<AvailityBatchID>-success` or `-FAILED`.
-   - Batch ID format: `YYYYMMDDHHMMSSSS` — this is the ID you give Availity Client Services for any support case.
-   - Notification files are purged nightly from `SendFiles` whether downloaded or not — **poll and archive them same-day**.
-4. If `-FAILED`: reasons are empty file, wrong file type (must be `.txt`), or first 3 bytes ≠ `ISA`. Rebatch with a **new interchange control number** and resubmit.
-
-### 3.5 Response files — what comes back, and in what order
-
-| Stage | File | What it tells you | Typical timing |
-|---|---|---|---|
-| 1. File-level | Notification (`-success`/`-FAILED`) | Did Availity even recognize the file | Seconds–minutes |
-| 2. File-level | `.ACK` | Proprietary format validation failed (usually malformed X12) | Minutes |
-| 3. Envelope-level | `.TA1` | ISA/IEA/GS envelope errors (dup control number, bad trading partner) | Minutes |
-| 4. Syntax-level | `.999` | Accept/reject per ST/SE transaction set (X12 syntax) | Minutes |
-| 5. Claim-level (fast) | `.ibr` / `.ibrp` / `.277IBR` | Per-claim accept/reject — HIPAA, payer-specific, or clinical edits | Minutes, up to 24h |
-| 6. Claim-level (payer) | `.ebr` / `.277EBR` | Aggregated payer/trading-partner status | 24–48h |
-| 7. Claim-level (late) | `.dpr` | Late-arriving payer status (not all payers) | Up to 30 days |
-| 8. Payment | `.era` (835) | Remittance — this is what feeds Delphi's payment waterfall | Per payer's own cycle |
-
-All of these land in `ReceiveFiles` (except the notification, which stays in `SendFiles`). **Response files are purged after 30 days** (self-restorable for 6 months; Availity Client Services can pull older ones on request).
-
-**IBR/EBR are available as pipe-delimited data files** (`.ibr`/`.ebr`, machine-parseable) **or as an X12 277CA** (`.277ibr`/`.277ebr`, if you'd rather parse standard X12 than Availity's pipe format) **or as human-readable text** (`.ibt`/`.ebt`). For a NestJS parser, pull the pipe-delimited format — it's flatter to map to Prisma rows than re-parsing X12.
-
-### 3.6 ISA/GS envelope requirements (what your 837 generator must emit)
-
-Fixed values Availity requires (deviating from these causes TA1/ACK rejects):
-
-| Segment | Field | Required value |
-|---|---|---|
-| ISA01/02 | Authorization Info Qualifier/Info | `00` / 10 blanks |
-| ISA03/04 | Security Info Qualifier/Info | `00` / 10 blanks |
-| ISA05 | Interchange ID Qualifier | `ZZ` |
-| ISA06 | Interchange Sender ID | Your Availity-assigned trading partner ID |
-| ISA07 | Interchange ID Qualifier (receiver) | `01` |
-| ISA08 | Interchange Receiver ID | `030240928` (+6 spaces) — Availity's D&B number |
-| ISA11 | Repetition Separator | `^` |
-| ISA12 | Version | `00501` |
-| ISA15 | Usage Indicator | `T` (test) / `P` (production) |
-| ISA16 | Component Element Separator | any Basic Character Set value |
-| Delimiters | element `*`, sub-element `:`, terminator `~`, repetition `^` | Don't reuse these inside data |
-| GS06 | Group Control Number | Unique per interchange, recommended unique for 6 months |
-| ST02 | Transaction Set Control Number | Sequential starting at 1 within each GS |
-
-Optimal batch size: **5,000 claims or 4 MB** per 837 file (12 MB soft ceiling on 835 processing — large-check 835s over 12 MB may not validate).
-
-### 3.7 Practical gotchas from Availity's own tips (worth codifying as validation rules before you ever batch)
-
-- No decimals in procedure/diagnosis codes (`52525`, not `525.25`).
-- No decimals in whole-dollar amounts (`27`, not `27.00`); round to 2 decimals max on cents (`59.99`, not `59.99223`).
-- Dates: `YYYYMMDD`, and every date on the claim (service date, onset, last-seen, etc.) must be **before** the transaction creation date.
-- No dashes in ZIP codes (dashes in SSN/tax ID/employer ID are stripped automatically, so harmless but pointless).
-- No colons or asterisks in free-text fields — they collide with X12 delimiters.
-- Max 50 service lines per claim.
-- Rebatched files need a **new** interchange control number or they're rejected as duplicates.
-- No cutoff time on Availity's side — but **payers** have their own daily cutoffs; ask each payer directly if same-day cycle matters.
-
-### 3.8 Operational reference
-
-- **System status:** `https://payernetworkstatus.availity.com/`
-- **Maintenance windows (ET):** code changes Wed 9–11pm; infra Wed 11pm–Thu 1am; misc Sun 12–8am
-- **Support:** 800-282-4548, business hours by timezone; **always have the Availity Batch ID ready**
-
----
-
-## 4. REST APIs — what's real, current, and usable today
-
-All REST calls need an **OAuth 2.0 client-credentials token** first (separate from your SFTP creds):
+From `backend/`:
 
 ```bash
-curl -i -X POST "https://api.availity.com/v1/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&scope=$SCOPE&client_id=$API_KEY&client_secret=$CLIENT_SECRET"
+cp .env.example .env
 ```
 
-Token is valid **5 minutes** — cache and refresh per-call in the service layer, don't try to hold it across requests.
+`backend/.env` is gitignored. `main.ts` loads it before the boot guard. A variable already exported in the shell overrides the file. Restart the Nest process after any change. The token and the host pairing are read at startup.
 
-### 4.1 Coverages (270/271) — already confirmed working
+The process will not listen unless these are non-empty: `AVAILITY_CLIENT_ID`, `AVAILITY_CLIENT_SECRET`, `AVAILITY_SFTP_HOST`, `AVAILITY_SFTP_USERNAME`, and exactly one of `AVAILITY_SFTP_PASSWORD` or `AVAILITY_SFTP_PRIVATE_KEY_PATH`. Joi also requires `AVAILITY_SUBMITTER_ID` and `AVAILITY_RECEIVER_ID` outside tests.
 
+| Variable | Value to set | Role |
+|---|---|---|
+| `AVAILITY_CLIENT_ID` | Developer Portal app | OAuth client id |
+| `AVAILITY_CLIENT_SECRET` | Developer Portal app | OAuth secret |
+| `AVAILITY_SCOPE` | `hipaa`, or the product’s scope string | Token request |
+| `AVAILITY_REALM` | empty unless the product page requires it | Optional token field |
+| `AVAILITY_BASE_URL` | `https://api.availity.com` | Prefix for Coverages, claim status, and payment-accuracy |
+| `AVAILITY_TOKEN_URL` | `https://api.availity.com/availity/v1/token` | Full token URL. Independent of `AVAILITY_BASE_URL` |
+| `AVAILITY_API_VERSION` | `v1` | Stored on the config object. Call paths in the REST service are explicit |
+| `AVAILITY_SUBMITTER_ID` | Id assigned by Availity | ISA06, GS02, eligibility `submitterId`, claim-status `submitterId` |
+| `AVAILITY_RECEIVER_ID` | `030240928` unless Client Services assigns another | ISA08 |
+| `AVAILITY_USAGE_INDICATOR` | `T` in QA, `P` in production | ISA15 |
+| `AVAILITY_SFTP_HOST` | `qa-files.availity.com` or `files.availity.com` | Must match the usage indicator |
+| `AVAILITY_SFTP_PORT` | `22` | |
+| `AVAILITY_SFTP_USERNAME` | Mailbox username | |
+| `AVAILITY_SFTP_PASSWORD` | Mailbox password | Leave unset when using a key |
+| `AVAILITY_SFTP_PRIVATE_KEY_PATH` | PEM path | Leave unset when using a password |
+| `AVAILITY_SFTP_SEND_PATH` | `/SendFiles` | |
+| `AVAILITY_SFTP_RECEIVE_PATH` | `/ReceiveFiles` | |
+| `AVAILITY_ALLOW_ENV_MISMATCH` | `false` | `true` allows a host and ISA15 pair the guard would refuse |
+| `AVAILITY_CONTROL_NUMBER_STORE` | empty, or a file path | Where ISA13 is persisted. Empty uses the service default path |
+| `AVAILITY_COVERAGE_POLL_ATTEMPTS` | `15` | Eligibility poll budget |
+| `AVAILITY_COVERAGE_POLL_INTERVAL_MS` | `2000` | Pause between coverage polls |
+| `PORT` | `3000` | Must be the Vite proxy target |
+| `NODE_ENV` | `development` | `test` skips the credential boot guard |
+| `LOG_LEVEL` | `debug` | `error`, `warn`, `info`, or `debug` |
+
+`OPTUM_*` variables in the same file configure the other clearinghouse. They do not authenticate Availity calls.
+
+### 3.4 Run
+
+```bash
+# Terminal 1 — API
+cd backend
+npm install
+npm run start:dev
+
+# Terminal 2 — dashboard
+cd frontend
+npm install
+npm run dev
 ```
-POST /v1/coverages          # submit + search recent requests
-GET  /v1/coverages/{id}     # poll / retrieve full detail
-DELETE /v1/coverages/{id}
-```
 
-Asynchronous pattern used across every one of these HIPAA REST APIs:
-1. `POST` → get back `statusCode` (`0` = In Progress, `4`/`3` = Complete) and an `id`.
-2. If `0`, poll `GET /v1/coverages/{id}` every ~2 seconds until status flips.
-3. Availity caches responses locally until `expirationDate` — repeat requests inside that window return the cached copy instead of re-querying the payer.
+Open `http://localhost:5173` and switch the clearinghouse control to Availity. The shell opens on Optum. Startup logs the listen URL, `AVAILITY_BASE_URL`, and the SFTP host.
 
-### 4.2 Claim Statuses (standard, 276/277) — this is the right replacement for the 404'd endpoint
-
-```
-POST /v1/claim-statuses
-GET  /v1/claim-statuses/{id}
-```
-
-Same async poll pattern as Coverages. This is different from **Enhanced Claim Status** (`.../clmsmgmt/claim-status/.../searchBy276`), which is a paid add-on product, **not available on a Demo key**, and wasn't what Delphi should have been calling. If Delphi only needs go/no-go claim status (not the richer value-add 277 data Enhanced Claim Status returns), standard Claim Statuses is sufficient and simpler.
-
-### 4.3 Configurations — use this before building any payer-specific request
-
-```
-GET /v1/configurations?type=270&payerId=<id>
-GET /v1/configurations?type=claim-statuses-inquiry&payerId=<id>
-```
-
-Returns the field-level validation rules (required fields, patterns, max lengths) **per payer**, because payers don't all require the same fields. Worth calling once per payer and caching the ruleset rather than hardcoding validation.
-
-### 4.4 Availity Payer List (REST)
-
-```
-GET /v1/availity-payer-list?payerId=&transactionType=&submissionMode=&availability=
-```
-
-Lets you programmatically check, per payer, whether a transaction is `available` (free) vs `contract required` (fee-based), and whether it's supported via `Portal`, `Batch`, `RealTime`, or `API`. Good candidate to sync into a Delphi payer-config table so allocation logic knows which channel a given payer actually supports.
-
-### 4.5 Not usable right now
-
-- **Remittance Data API** — closed BETA per Availity's blog listing, no prod/Demo access, no ETA. Don't build against it.
-- **Enhanced Claim Status** — paid add-on, not in Demo.
-- **837 claim submission via REST** — doesn't exist as a product; `professional-claims`/`institutional-claims` REST paths are Patient Cost Estimator (predetermination), not claim submission.
-
----
-
-## 5. Gap summary — what to fix in Delphi's plan
-
-| Gap | Fix |
-|---|---|
-| Assumed REST covered claim submission | Build the 837 generator/submitter against **SFTP Batch EDI**, not REST |
-| Wrong SFTP host (`sftp.availity.com`) | Use `files.availity.com` / `qa-files.availity.com`, port 22 |
-| Called Enhanced Claim Status, not entitled to it in Demo | Use standard `POST /v1/claim-statuses` for REST-based status checks |
-| Assumed a Remittance REST API | ERA/835 only arrives via Batch EDI `ReceiveFiles`, after per-payer ERA enrollment |
-| No production API key provisioned | Contact Availity Client Services / your account rep to confirm the org's actual contract tier and get production credentials issued (separate from the Demo key you tested with) |
-| No webhook for new files | None exists — Availity confirmed no webhook option in the guide. Plan on **polling** `ReceiveFiles` on an interval (or after each `SendFiles` submission) rather than push notifications |
-
----
-
-## 6. Suggested POC scope for Delphi (NestJS/Prisma)
-
-Given the payment waterfall and PR-first allocation engine both key off remittance data, the POC should prove the **full closed loop**, not just "can we log in":
-
-1. **SFTP service module** — wraps an SFTP client (`ssh2-sftp-client` or similar) pointed at QA (`qa-files.availity.com`), with `SendFiles`/`ReceiveFiles` polling.
-2. **837P generator** — build one real test claim (test ISA15=T) from existing Delphi claim data → drop in `SendFiles`.
-3. **Response poller** — cron/queue job that lists `ReceiveFiles`, pulls new files, and routes by extension: `.ACK`/`.TA1`/`.999` → file/envelope error table; `.ibr` (pipe-delimited) → claim-level accept/reject table, matched back to the Delphi claim by `CLM01`/patient control number.
-4. **ERA ingestion** — once ERA enrollment is confirmed for at least one test payer, parse an `.era` (835) file into the existing payment-bifurcation / waterfall pipeline as a new ingestion source, alongside however remits are entered today.
-5. **Reconciliation view** — Batch ID → claims sent → responses received → ERA applied, so Delphi engineers can see the whole lifecycle of one test batch without digging through raw files.
-
-**Sequencing:** get step 1–3 working end-to-end in QA first (this validates connectivity and response parsing without needing real payer money movement), then tackle ERA enrollment + step 4 in parallel with Availity Client Services, since ERA enrollment is a per-payer process with its own lead time.
-
----
-
-## 7. Questions to put back to Availity Client Services
-
-1. What is Delphi's actual current contract/plan tier, and which transactions on the payer list are `available` vs `contract required` for us specifically?
-2. Can they issue **production** SFTP credentials and, separately, a **production** REST API key/secret (the Demo key is rate-limited to 3 tps / 500 per day)?
-3. Which payers does Delphi bill most often, and are we already ERA-enrolled with any of them, or does that need to be initiated per payer?
-4. Confirm whether standard `POST /v1/claim-statuses` is included in our current contract, or whether it also requires a separate subscription.
+A missing credential stops the process with `Availity configuration missing` and the names of the empty variables. The boot log line `Obtained Availity access token` means the Developer Portal client id, secret, token URL, and scope were accepted.

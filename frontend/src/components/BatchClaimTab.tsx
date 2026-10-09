@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { api } from '../lib/api';
-import { Badge, ErrorAlert, Field, Spinner, inputClass } from './ui';
+import { ApiError, api } from '../lib/api';
+import { Badge, ErrorAlert, Field, FillSelect, Spinner, inputClass } from './ui';
 
 interface ServiceLineForm {
   procedureCode: string;
@@ -9,18 +9,44 @@ interface ServiceLineForm {
   quantity: string;
 }
 
+interface ClaimEdit {
+  severity?: string;
+  ruleCode?: string;
+  description?: string;
+  message?: string;
+  lineNumber?: number | string;
+}
+
+interface ClaimValidation {
+  valid: boolean;
+  triggeredResult: ClaimEdit[];
+  transactionIdentifier?: string;
+  x12Payload: string;
+}
+
+interface PostalForm {
+  address1: string;
+  city: string;
+  state: string;
+  zip: string;
+}
+
 interface BatchForm {
   payerId: string;
   claimControlNumber: string;
+  frequencyCode: string;
   diagnosisCode: string;
   subscriberFirstName: string;
   subscriberLastName: string;
   memberId: string;
-  dateOfBirth: string;
+  birthDate: string;
   gender: string;
+  subscriberAddress: PostalForm;
   billingName: string;
   billingNpi: string;
   billingTaxId: string;
+  billingAddress: PostalForm;
+  placeOfService: string;
   lines: ServiceLineForm[];
 }
 
@@ -40,26 +66,60 @@ interface NotificationStatus {
 }
 
 const emptyLine = (): ServiceLineForm => ({
-  procedureCode: '99213',
-  amount: '150.00',
-  serviceDate: '2026-09-10',
+  procedureCode: '',
+  amount: '',
+  serviceDate: '',
   quantity: '1',
 });
 
-const initialForm: BatchForm = {
-  payerId: '00001',
-  claimControlNumber: 'PCN001',
-  diagnosisCode: 'J06.9',
-  subscriberFirstName: 'JOHN',
-  subscriberLastName: 'DOE',
-  memberId: 'MEM8941029',
-  dateOfBirth: '1985-04-12',
+const emptyAddress = (): PostalForm => ({ address1: '', city: '', state: '', zip: '' });
+
+const emptyForm: BatchForm = {
+  payerId: '',
+  claimControlNumber: '',
+  frequencyCode: '1',
+  diagnosisCode: '',
+  subscriberFirstName: '',
+  subscriberLastName: '',
+  memberId: '',
+  birthDate: '',
   gender: 'M',
-  billingName: 'BILLING CLINIC',
-  billingNpi: '1234567893',
-  billingTaxId: '12-3456789',
+  subscriberAddress: emptyAddress(),
+  billingName: '',
+  billingNpi: '',
+  billingTaxId: '',
+  billingAddress: emptyAddress(),
+  placeOfService: '11',
   lines: [emptyLine()],
 };
+
+const officeVisit: BatchForm = {
+  payerId: '00001',
+  claimControlNumber: 'CLM123456',
+  frequencyCode: '1',
+  diagnosisCode: 'I10',
+  subscriberFirstName: 'John',
+  subscriberLastName: 'Doe',
+  memberId: 'MEM123456',
+  birthDate: '1980-01-01',
+  gender: 'M',
+  subscriberAddress: { address1: '200 Elm St', city: 'Concord', state: 'NH', zip: '03301' },
+  billingName: 'The Delphi Group LLC',
+  billingNpi: '1194476978',
+  billingTaxId: '27-2499372',
+  billingAddress: { address1: '100 Main St', city: 'Concord', state: 'NH', zip: '03301' },
+  placeOfService: '11',
+  lines: [{ procedureCode: '99213', amount: '100.00', serviceDate: '2026-03-01', quantity: '1' }],
+};
+
+const fillOptions = [{ id: 'qa-claim', label: 'Autofill QA Claim', value: officeVisit }];
+
+const VALIDATION_403_WARNING =
+  'REST Pre-validation unavailable (403 Forbidden). You can still proceed with direct SFTP submission.';
+
+function isValidationForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403;
+}
 
 function lineCharge(line: ServiceLineForm): number {
   const quantity = Number(line.quantity);
@@ -71,12 +131,16 @@ function lineCharge(line: ServiceLineForm): number {
 }
 
 export default function BatchClaimTab() {
-  const [form, setForm] = useState<BatchForm>(initialForm);
+  const [form, setForm] = useState<BatchForm>(emptyForm);
   const [submitting, setSubmitting] = useState(false);
+  const [validating, setValidating] = useState(false);
   const [error, setError] = useState('');
+  const [edits, setEdits] = useState<ClaimValidation | null>(null);
   const [upload, setUpload] = useState<UploadResult | null>(null);
   const [notice, setNotice] = useState<NotificationStatus | null>(null);
   const [polling, setPolling] = useState(false);
+  const [skipValidation, setSkipValidation] = useState(false);
+  const [validationWarning, setValidationWarning] = useState('');
 
   const totalCharge = useMemo(() => form.lines.reduce((sum, line) => sum + lineCharge(line), 0), [form.lines]);
   const terminal = notice?.status === 'SUCCESS' || notice?.status === 'FAILED';
@@ -115,6 +179,90 @@ export default function BatchClaimTab() {
     };
   }, [upload?.fileName, terminal]);
 
+  function localProblems(): string | null {
+    const diagnosis = form.diagnosisCode.trim();
+    if (!diagnosis) {
+      return 'Primary diagnosis is required';
+    }
+    if (!/^(?![Ee])/.test(diagnosis)) {
+      return 'Primary diagnosis cannot start with E';
+    }
+    const frequencyCode = form.frequencyCode || '1';
+    if (!/^[1-8]$/.test(frequencyCode)) {
+      return 'Frequency code must be 1 through 8';
+    }
+    if (!(form.placeOfService || '11').trim()) {
+      return 'Place of service is required';
+    }
+    if (!form.billingName.trim()) {
+      return 'Billing provider organization name is required';
+    }
+    return null;
+  }
+
+  function claimBody() {
+    const organizationName = form.billingName.trim();
+    const frequencyCode = form.frequencyCode || '1';
+    const placeOfService = form.placeOfService || '11';
+    return {
+      claimType: 'professional',
+      tradingPartnerId: form.payerId.trim(),
+      claimControlNumber: form.claimControlNumber.trim(),
+      frequencyCode,
+      placeOfService,
+      billingProvider: {
+        name: organizationName,
+        organizationName,
+        npi: form.billingNpi.trim(),
+        taxId: form.billingTaxId.trim(),
+        address: {
+          address1: form.billingAddress.address1.trim(),
+          city: form.billingAddress.city.trim(),
+          state: form.billingAddress.state.trim(),
+          zip: form.billingAddress.zip.trim(),
+        },
+      },
+      subscriber: {
+        firstName: form.subscriberFirstName.trim(),
+        lastName: form.subscriberLastName.trim(),
+        memberId: form.memberId.trim(),
+        birthDate: form.birthDate,
+        gender: form.gender,
+        address: {
+          address1: form.subscriberAddress.address1.trim(),
+          city: form.subscriberAddress.city.trim(),
+          state: form.subscriberAddress.state.trim(),
+          zip: form.subscriberAddress.zip.trim(),
+        },
+      },
+      diagnoses: [{ code: form.diagnosisCode.trim() }],
+      serviceLines: form.lines.map((line, index) => ({
+        lineNumber: index + 1,
+        procedureCode: line.procedureCode.trim(),
+        quantity: Number(line.quantity),
+        unitPrice: Number(line.amount),
+        serviceDate: line.serviceDate,
+        placeOfService,
+        diagnosisPointer: '1',
+      })),
+      totalCharge,
+    };
+  }
+
+  async function runValidation(): Promise<ClaimValidation> {
+    return api<ClaimValidation>('/api/availity/claims/validate', {
+      method: 'POST',
+      body: JSON.stringify(claimBody()),
+    });
+  }
+
+  async function submitBatch(): Promise<UploadResult> {
+    return api<UploadResult>('/api/availity/claims/batch-submit', {
+      method: 'POST',
+      body: JSON.stringify(claimBody()),
+    });
+  }
+
   function updateLine(index: number, field: keyof ServiceLineForm, value: string) {
     setForm((current) => ({
       ...current,
@@ -122,45 +270,64 @@ export default function BatchClaimTab() {
     }));
   }
 
+  async function onValidate() {
+    const problem = localProblems();
+    if (problem) {
+      setError(problem);
+      setEdits(null);
+      return;
+    }
+    setValidating(true);
+    setError('');
+    setEdits(null);
+    setValidationWarning('');
+    try {
+      setEdits(await runValidation());
+    } catch (err) {
+      if (isValidationForbidden(err)) {
+        setValidationWarning(VALIDATION_403_WARNING);
+        return;
+      }
+      setError(err instanceof Error ? err.message : 'Claim validation failed');
+    } finally {
+      setValidating(false);
+    }
+  }
+
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
+    const problem = localProblems();
+    if (problem) {
+      setError(problem);
+      return;
+    }
     setSubmitting(true);
     setError('');
     setUpload(null);
     setNotice(null);
+    if (!skipValidation) {
+      setEdits(null);
+      setValidationWarning('');
+    }
     try {
-      const result = await api<UploadResult>('/api/availity/claims/batch-submit', {
-        method: 'POST',
-        body: JSON.stringify({
-          claimType: 'professional',
-          tradingPartnerId: form.payerId.trim(),
-          claimControlNumber: form.claimControlNumber.trim(),
-          frequencyCode: '1',
-          billingProvider: {
-            npi: form.billingNpi.trim(),
-            taxId: form.billingTaxId.trim(),
-            name: form.billingName.trim(),
-          },
-          subscriber: {
-            memberId: form.memberId.trim(),
-            firstName: form.subscriberFirstName.trim(),
-            lastName: form.subscriberLastName.trim(),
-            dateOfBirth: form.dateOfBirth,
-            gender: form.gender,
-          },
-          diagnoses: [{ code: form.diagnosisCode.trim() }],
-          serviceLines: form.lines.map((line, index) => ({
-            lineNumber: index + 1,
-            procedureCode: line.procedureCode.trim(),
-            serviceDate: line.serviceDate,
-            quantity: Number(line.quantity),
-            unitPrice: Number(line.amount),
-            diagnosisPointer: '1',
-          })),
-          totalCharge,
-        }),
-      });
-      setUpload(result);
+      if (!skipValidation) {
+        try {
+          const validation = await runValidation();
+          setEdits(validation);
+          const blocking = validation.triggeredResult.filter((edit) => edit.severity?.trim().toLowerCase() === 'error');
+          if (blocking.length > 0) {
+            setError('Availity returned claim edits with severity Error. The batch was not uploaded.');
+            return;
+          }
+        } catch (err) {
+          if (!isValidationForbidden(err)) {
+            throw err;
+          }
+          setValidationWarning(VALIDATION_403_WARNING);
+          setEdits(null);
+        }
+      }
+      setUpload(await submitBatch());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Batch submit failed');
     } finally {
@@ -178,6 +345,8 @@ export default function BatchClaimTab() {
           </p>
         </div>
 
+        <FillSelect options={fillOptions} onFill={setForm} onClear={() => setForm(emptyForm)} />
+
         <div className="grid gap-4 md:grid-cols-3">
           <Field label="Payer ID">
             <input className={inputClass} required value={form.payerId} onChange={(event) => setForm({ ...form, payerId: event.target.value })} />
@@ -189,6 +358,28 @@ export default function BatchClaimTab() {
               value={form.claimControlNumber}
               onChange={(event) => setForm({ ...form, claimControlNumber: event.target.value })}
             />
+          </Field>
+          <Field label="Frequency code">
+            <select className={inputClass} value={form.frequencyCode} onChange={(event) => setForm({ ...form, frequencyCode: event.target.value })}>
+              <option value="1">1 — Original</option>
+              <option value="2">2 — Interim</option>
+              <option value="3">3 — Final</option>
+              <option value="4">4 — Void</option>
+              <option value="5">5 — Replacement</option>
+              <option value="6">6 — Corrected</option>
+              <option value="7">7 — Replacement of prior</option>
+              <option value="8">8 — Void of prior</option>
+            </select>
+          </Field>
+          <Field label="Place of service">
+            <select className={inputClass} value={form.placeOfService} onChange={(event) => setForm({ ...form, placeOfService: event.target.value })}>
+              <option value="11">11 — Office</option>
+              <option value="12">12 — Home</option>
+              <option value="20">20 — Urgent care</option>
+              <option value="21">21 — Inpatient hospital</option>
+              <option value="22">22 — Outpatient hospital</option>
+              <option value="23">23 — Emergency room</option>
+            </select>
           </Field>
           <Field label="Diagnosis (ICD-10)">
             <input
@@ -226,16 +417,48 @@ export default function BatchClaimTab() {
               className={inputClass}
               type="date"
               required
-              value={form.dateOfBirth}
-              onChange={(event) => setForm({ ...form, dateOfBirth: event.target.value })}
+              value={form.birthDate}
+              onChange={(event) => setForm({ ...form, birthDate: event.target.value })}
             />
           </Field>
           <Field label="Gender">
             <select className={inputClass} value={form.gender} onChange={(event) => setForm({ ...form, gender: event.target.value })}>
               <option value="M">M</option>
               <option value="F">F</option>
-              <option value="U">U</option>
             </select>
+          </Field>
+          <Field label="Address">
+            <input
+              className={inputClass}
+              required
+              value={form.subscriberAddress.address1}
+              onChange={(event) => setForm({ ...form, subscriberAddress: { ...form.subscriberAddress, address1: event.target.value } })}
+            />
+          </Field>
+          <Field label="City">
+            <input
+              className={inputClass}
+              required
+              value={form.subscriberAddress.city}
+              onChange={(event) => setForm({ ...form, subscriberAddress: { ...form.subscriberAddress, city: event.target.value } })}
+            />
+          </Field>
+          <Field label="State">
+            <input
+              className={inputClass}
+              required
+              maxLength={2}
+              value={form.subscriberAddress.state}
+              onChange={(event) => setForm({ ...form, subscriberAddress: { ...form.subscriberAddress, state: event.target.value } })}
+            />
+          </Field>
+          <Field label="ZIP">
+            <input
+              className={inputClass}
+              required
+              value={form.subscriberAddress.zip}
+              onChange={(event) => setForm({ ...form, subscriberAddress: { ...form.subscriberAddress, zip: event.target.value } })}
+            />
           </Field>
         </fieldset>
 
@@ -255,6 +478,39 @@ export default function BatchClaimTab() {
           </Field>
           <Field label="Tax ID">
             <input className={inputClass} required value={form.billingTaxId} onChange={(event) => setForm({ ...form, billingTaxId: event.target.value })} />
+          </Field>
+          <Field label="Address">
+            <input
+              className={inputClass}
+              required
+              value={form.billingAddress.address1}
+              onChange={(event) => setForm({ ...form, billingAddress: { ...form.billingAddress, address1: event.target.value } })}
+            />
+          </Field>
+          <Field label="City">
+            <input
+              className={inputClass}
+              required
+              value={form.billingAddress.city}
+              onChange={(event) => setForm({ ...form, billingAddress: { ...form.billingAddress, city: event.target.value } })}
+            />
+          </Field>
+          <Field label="State">
+            <input
+              className={inputClass}
+              required
+              maxLength={2}
+              value={form.billingAddress.state}
+              onChange={(event) => setForm({ ...form, billingAddress: { ...form.billingAddress, state: event.target.value } })}
+            />
+          </Field>
+          <Field label="ZIP">
+            <input
+              className={inputClass}
+              required
+              value={form.billingAddress.zip}
+              onChange={(event) => setForm({ ...form, billingAddress: { ...form.billingAddress, zip: event.target.value } })}
+            />
           </Field>
         </fieldset>
 
@@ -300,15 +556,43 @@ export default function BatchClaimTab() {
           </p>
         </div>
 
-        <button
-          type="submit"
-          disabled={submitting}
-          className="inline-flex items-center justify-center rounded-lg bg-availity-500 px-4 py-2 text-sm font-semibold text-white hover:bg-availity-600 disabled:opacity-60"
-        >
-          {submitting ? <Spinner label="Uploading batch..." /> : 'Submit batch claim'}
-        </button>
+        {validationWarning ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="status">
+            {validationWarning}
+          </div>
+        ) : null}
+
+        <label className="flex items-start gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={skipValidation}
+            onChange={(event) => setSkipValidation(event.target.checked)}
+          />
+          <span>Submit Directly via SFTP (Skip Pre-Validation)</span>
+        </label>
+
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            disabled={validating || submitting}
+            onClick={() => void onValidate()}
+            className="inline-flex items-center justify-center rounded-lg border border-availity-500 px-4 py-2 text-sm font-semibold text-availity-700 hover:bg-availity-50 disabled:opacity-60"
+          >
+            {validating ? <Spinner label="Validating claim..." /> : 'Validate Claim (Dry Run)'}
+          </button>
+          <button
+            type="submit"
+            disabled={submitting || validating}
+            className="inline-flex items-center justify-center rounded-lg bg-availity-500 px-4 py-2 text-sm font-semibold text-white hover:bg-availity-600 disabled:opacity-60"
+          >
+            {submitting ? <Spinner label="Uploading batch..." /> : skipValidation ? 'Submit directly via SFTP' : 'Submit batch claim'}
+          </button>
+        </div>
         {error ? <ErrorAlert message={error} /> : null}
       </form>
+
+      {edits ? <ClaimEdits validation={edits} /> : null}
 
       {upload ? (
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -339,6 +623,40 @@ export default function BatchClaimTab() {
         </section>
       ) : null}
     </div>
+  );
+}
+
+function ClaimEdits({ validation }: { validation: ClaimValidation }) {
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-lg font-semibold text-slate-900">Claim validation</h2>
+        <Badge tone={validation.valid ? 'green' : 'amber'}>{validation.valid ? 'No edits' : `${validation.triggeredResult.length} edit(s)`}</Badge>
+      </div>
+      {validation.transactionIdentifier ? (
+        <p className="mt-2 text-sm text-slate-500">Transaction {validation.transactionIdentifier}</p>
+      ) : null}
+      {validation.triggeredResult.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-600">Availity returned an empty triggeredResult. This claim can be uploaded.</p>
+      ) : (
+        <ul className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200">
+          {validation.triggeredResult.map((edit, index) => (
+            <li key={`${edit.ruleCode || 'edit'}-${edit.lineNumber || index}`} className="space-y-1 px-4 py-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={edit.severity?.trim().toLowerCase() === 'error' ? 'red' : edit.severity?.trim().toLowerCase() === 'warning' ? 'amber' : 'slate'}>
+                  {edit.severity || 'Edit'}
+                </Badge>
+                {edit.ruleCode ? <span className="font-medium text-slate-900">{edit.ruleCode}</span> : null}
+                {edit.lineNumber !== undefined && edit.lineNumber !== '' ? (
+                  <span className="text-slate-500">Line {edit.lineNumber}</span>
+                ) : null}
+              </div>
+              <p className="text-slate-700">{edit.description || edit.message || 'Availity did not include an edit description.'}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

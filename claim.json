@@ -1,0 +1,49 @@
+{
+  "claimType": "professional",
+  "tradingPartnerId": "00001",
+  "claimControlNumber": "CLM123456",
+  "frequencyCode": "1",
+  "placeOfService": "11",
+  "billingProvider": {
+    "name": "The Delphi Group LLC",
+    "organizationName": "The Delphi Group LLC",
+    "npi": "1194476978",
+    "taxId": "27-2499372",
+    "address": {
+      "address1": "100 Main St",
+      "city": "Concord",
+      "state": "NH",
+      "zip": "03301"
+    }
+  },
+  "subscriber": {
+    "firstName": "John",
+    "lastName": "Doe",
+    "memberId": "MEM123456",
+    "birthDate": "1980-01-01",
+    "gender": "M",
+    "address": {
+      "address1": "200 Elm St",
+      "city": "Concord",
+      "state": "NH",
+      "zip": "03301"
+    }
+  },
+  "diagnoses": [
+    {
+      "code": "I10"
+    }
+  ],
+  "serviceLines": [
+    {
+      "lineNumber": 1,
+      "procedureCode": "99213",
+      "quantity": 1,
+      "unitPrice": 100.0,
+      "serviceDate": "2026-03-01",
+      "placeOfService": "11",
+      "diagnosisPointer": "1"
+    }
+  ],
+  "totalCharge": 100.0
+}

@@ -113,13 +113,7 @@ CLEAN
 
 `npm test` — 33 passed. `npm run test:e2e` — 5 passed. Frontend `tsc --noEmit` passed.
 
-Export the env file before a normal boot. The guard reads `process.env` before Nest applies `.env`:
-
-```
-set -a && source .env && set +a && npm run start:dev
-```
-
-A populated `.env` passes that guard. This shell check printed `guard passed with exported .env`.
+Update: `main.ts` now runs `process.loadEnvFile('.env')` before the guard, without overriding shell-exported values. With a populated `backend/.env`, `npm run start:dev` boots without exporting anything. Proof #5 still fails only when the credentials are missing from both the shell and `.env`. With no `.env` in the working directory, `node dist/main.js` prints `Availity configuration missing` and exits 1.
 
 ## Residual risks
 

@@ -30,16 +30,42 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-export function SampleButtons({ onSample, onClear }: { onSample: () => void; onClear: () => void }) {
+export function FillSelect<T>({
+  options,
+  onFill,
+  onClear,
+}: {
+  options: { id: string; label: string; value: T }[];
+  onFill: (value: T) => void;
+  onClear: () => void;
+}) {
+  const [selected, setSelected] = useState('');
   return (
-    <div className="flex gap-4 text-sm font-medium">
-      <button type="button" onClick={onSample} className="text-availity-600 hover:text-availity-700">
-        Load sandbox sample
-      </button>
-      <button type="button" onClick={onClear} className="text-slate-500 hover:text-slate-700">
-        Clear
-      </button>
-    </div>
+    <Field label="Fill inputs">
+      <select
+        className={inputClass}
+        value={selected}
+        onChange={(event) => {
+          const id = event.target.value;
+          setSelected(id);
+          if (!id) {
+            onClear();
+            return;
+          }
+          const option = options.find((item) => item.id === id);
+          if (option) {
+            onFill(structuredClone(option.value));
+          }
+        }}
+      >
+        <option value="">Choose an example to fill these fields</option>
+        {options.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </Field>
   );
 }
 

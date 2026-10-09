@@ -46,6 +46,20 @@ export class AvailityController {
     return this.restService.getClaimStatus(id);
   }
 
+  @Post('claims/validate')
+  @HttpCode(HttpStatus.OK)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async validateClaim(@Body() claim: ClaimInputDto) {
+    const x12Payload = this.x12Builder.build837Claim(claim);
+    const edits = await this.restService.validateClaimX12(x12Payload, claim.billingProvider.taxId, claim.tradingPartnerId);
+    return {
+      valid: edits.triggeredResult.length === 0,
+      triggeredResult: edits.triggeredResult,
+      transactionIdentifier: edits.transactionIdentifier,
+      x12Payload,
+    };
+  }
+
   @Post('claims/batch-submit')
   @HttpCode(HttpStatus.ACCEPTED)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))

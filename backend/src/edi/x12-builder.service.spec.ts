@@ -21,21 +21,31 @@ function claim(overrides: Partial<ClaimInputDto> = {}): ClaimInputDto {
     tradingPartnerId: '00001',
     claimControlNumber: 'PCN001',
     frequencyCode: ClaimFrequencyCode.ORIGINAL,
+    placeOfService: PlaceOfService.OFFICE,
     billingProvider: {
       npi: '1234567893',
       taxId: '12-3456789',
       name: 'BILLING CLINIC',
-      address1: '123 MAIN ST',
-      city: 'JACKSONVILLE',
-      state: 'FL',
-      zip: '32202',
+      organizationName: 'BILLING CLINIC',
+      address: {
+        address1: '123 MAIN ST',
+        city: 'JACKSONVILLE',
+        state: 'FL',
+        zip: '32202',
+      },
     },
     subscriber: {
       memberId: 'MEM8941029',
       firstName: 'JOHN',
       lastName: 'DOE',
-      dateOfBirth: '1985-04-12',
+      birthDate: '1985-04-12',
       gender: 'M',
+      address: {
+        address1: '88 OAK STREET',
+        city: 'JACKSONVILLE',
+        state: 'FL',
+        zip: '32202',
+      },
     },
     diagnoses: [{ code: 'J06.9' }],
     serviceLines: [
@@ -56,6 +66,7 @@ function claim(overrides: Partial<ClaimInputDto> = {}): ClaimInputDto {
         quantity: 2,
         unitPrice: 25,
         diagnosisPointer: '1',
+        placeOfService: PlaceOfService.OFFICE,
       },
     ],
     totalCharge: 150,
@@ -86,6 +97,8 @@ describe('X12BuilderService 837P', () => {
     expect(segments).toContain('NM1*41*2*BILLING CLINIC*****46*AV09311993');
     expect(segments).toContain('NM1*40*2*AVAILITY*****46*030240928');
     expect(segments).toContain('NM1*85*2*BILLING CLINIC*****XX*1234567893');
+    expect(segments).toContain('N3*123 MAIN ST');
+    expect(segments).toContain('N4*JACKSONVILLE*FL*32202');
     expect(segments).toContain('REF*EI*123456789');
     expect(segments).toContain('NM1*IL*1*DOE*JOHN****MI*MEM8941029');
     expect(segments).toContain('DMG*D8*19850412*M');
@@ -112,11 +125,18 @@ describe('X12BuilderService 837P', () => {
     ).toThrow(BadRequestException);
   });
 
-  it('rejects a tax id that is not a 9-digit EIN', () => {
+  it('rejects a tax id that is not NN-NNNNNNN', () => {
     expect(() =>
       service().build837Claim(
         claim({
           billingProvider: { ...claim().billingProvider, taxId: '1234' },
+        }),
+      ),
+    ).toThrow(BadRequestException);
+    expect(() =>
+      service().build837Claim(
+        claim({
+          billingProvider: { ...claim().billingProvider, taxId: '123456789' },
         }),
       ),
     ).toThrow(BadRequestException);
@@ -148,6 +168,7 @@ describe('X12BuilderService 837P', () => {
               quantity: 1,
               unitPrice: 1,
               diagnosisPointer: '1',
+              placeOfService: PlaceOfService.OFFICE,
             })),
             totalCharge: 51,
           }),

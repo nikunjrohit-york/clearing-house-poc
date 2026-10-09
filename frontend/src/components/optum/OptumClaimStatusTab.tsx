@@ -1,7 +1,7 @@
 import { FormEvent, useState } from 'react';
 import { StepAudit, blankForm, controlNumber, optumErrorText, optumPost, ymd } from '../../lib/optum';
 import { SubmittedClaim } from '../../lib/optum-claim';
-import { Badge, ErrorAlert, Field, RawJson, SampleButtons, Spinner, inputClass } from '../ui';
+import { Badge, ErrorAlert, Field, FillSelect, RawJson, Spinner, inputClass } from '../ui';
 
 interface ClaimStatusRow {
   categoryCode: string;
@@ -118,7 +118,11 @@ export default function OptumClaimStatusTab({ lastClaim }: { lastClaim: Submitte
           <h2 className="text-lg font-semibold text-slate-900">Claim status (276/277)</h2>
           <p className="mt-1 text-sm text-slate-500">POST /medicalnetwork/claimstatus/v2. Real-time inquiry by member, service dates, and charge amount.</p>
         </div>
-        <SampleButtons onSample={() => setForm(sampleForm)} onClear={() => setForm(emptyForm)} />
+        <FillSelect
+          options={[{ id: 'johnone', label: 'johnone doeone — claim status inquiry', value: sampleForm }]}
+          onFill={setForm}
+          onClear={() => setForm(emptyForm)}
+        />
         {lastClaim ? (
           <button type="button" onClick={useLastClaim} className="text-sm font-medium text-availity-600 hover:text-availity-700">
             Fill from last submitted claim {lastClaim.claimControlNumber ? `(${lastClaim.claimControlNumber})` : ''}
